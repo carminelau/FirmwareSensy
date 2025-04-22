@@ -19,6 +19,7 @@
 #include "SensirionI2CSen5x.h"
 #include <SensirionI2cScd30.h>
 #include <SensirionI2cScd4x.h>
+#include <BH1750.h>
 
 // Libreria GPS
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
@@ -71,6 +72,9 @@
 #define CALIBRATION_TIME 1
 #define MICS_I2C_ADDRESS MICS_ADDRESS_0
 
+#define STR_HELPER(x) #x
+#define STR(x) STR_HELPER(x)
+
 /**********************************
  *     STRUTTURE DATI SENSORI     *
  **********************************/
@@ -121,11 +125,12 @@ String nameBinESP = "";
 String nameBinServer;
 String topicListen;
 String timezone_it = "CET-1CEST,M3.5.0,M10.5.0/3";
+const char* verionBoard = STR(YEAR) "V" STR(VERSION);
 
 /**********************************
  *     VARIABILI DI STATO         *
  **********************************/
-bool sps, ozone, pmsa003, gas, sht, ane, low;
+bool sps, ozone, pmsa003, gas, sht, ane, low, lux;
 bool sen55, scd30, scd41, mics4514;
 bool accesspoint, relay1, relay2;
 
@@ -153,6 +158,7 @@ volatile unsigned long current_low;
 AsyncWebServer server(80);
 TaskHandle_t Task1;
 TaskHandle_t Task2;
+BH1750 lightMeter;
 
 DFRobot_MICS_I2C mics(&Wire, MICS_I2C_ADDRESS);
 DFRobot_OzoneSensor Ozone;
@@ -351,6 +357,9 @@ bool read_scd30();
 
 bool init_scd4x();
 bool read_scd4x();
+
+bool init_luxometer();
+float read_luxometer();
 
 void check_sensors_diagnostics();
 void send_sensors_diagnostics();

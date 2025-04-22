@@ -11,7 +11,7 @@ void setup()
     neopixelWrite(LEDRGB_PIN, 0, 0, 255);
 #endif
 #if LED_TYPE == 1
-    Serial.println("LED RGB BLUE");
+    Serial.println("LED GRB BLUE");
     neopixelWrite(LEDRGB_PIN, 0, 0, 255);
 #endif
 
@@ -67,7 +67,7 @@ void setup()
         neopixelWrite(LEDRGB_PIN, 255, 0, 0);
 #endif
 #if LED_TYPE == 1
-        Serial.println("LED RGB RED");
+        Serial.println("LED GRB RED");
         neopixelWrite(LEDRGB_PIN, 0, 255, 0);
 #endif
     }
@@ -78,7 +78,7 @@ void setup()
         neopixelWrite(LEDRGB_PIN, 0, 255, 0);
 #endif
 #if LED_TYPE == 1
-        Serial.println("LED RGB GREEN");
+        Serial.println("LED GRB GREEN");
         neopixelWrite(LEDRGB_PIN, 255, 0, 0);
 #endif
     }
@@ -167,32 +167,38 @@ void loop_0_core(void *pvParameters)
         saveCounterSD = get_count_data_saved(SD);
         saveCounterSPIFFS = get_count_data_saved(SPIFFS);
 
-        if (saveCounterSD > 20 || saveCounterSPIFFS > 20)
+        if ((saveCounterSD > 20 || saveCounterSPIFFS > 20) && conf)
         {
-            connect_wifi_network();
-            Serial.println("WiFi Status: " + String(WiFi.status()));
-            if (WiFi.status() != WL_NO_SSID_AVAIL)
+            connect_wifi_network(); // dovrebbe iniziare la connessione
+
+            int status_wifi = WiFi.status();
+            Serial.println();
+            Serial.println("WiFi Status: " + String(status_wifi));
+
+            if (status_wifi != WL_CONNECTED)
             {
                 create_access_point();
+                accesspoint = true;
 #if LED_TYPE == 2
+                Serial.println("LED RGB AQUA AP ON AFTER 20 FILES");
                 neopixelWrite(LEDRGB_PIN, 0, 255, 255); // Aqua
 #endif
 #if LED_TYPE == 1
+                Serial.println("LED GRB AQUA AP ON AFTER 20 FILES");
                 neopixelWrite(LEDRGB_PIN, 255, 0, 255); // Aqua
 #endif
             }
             else
             {
-                if (WiFi.status() == WL_CONNECTED)
-                {
-                    accesspoint = false;
+                accesspoint = false;
 #if LED_TYPE == 2
-                    neopixelWrite(LEDRGB_PIN, 0, 255, 0); // Green
+                Serial.println("LED RGB GREEN");
+                neopixelWrite(LEDRGB_PIN, 0, 255, 0); // Green
 #endif
 #if LED_TYPE == 1
-                    neopixelWrite(LEDRGB_PIN, 255, 0, 0); // Green
+                Serial.println("LED GRB GREEN");
+                neopixelWrite(LEDRGB_PIN, 255, 0, 0); // Green
 #endif
-                }
             }
         }
 
@@ -204,6 +210,9 @@ void loop_0_core(void *pvParameters)
             if (wifi && !accesspoint)
             {
                 delay(2000);
+                Serial.println("Row 217: Disconnecting WiFi...");
+                Serial.println("WiFi: " + String(wifi));
+                Serial.println("Access Point: " + String(accesspoint));
                 disconnect_access_point();
             }
         }
@@ -222,6 +231,9 @@ void loop_0_core(void *pvParameters)
             if (wifi && !accesspoint)
             {
                 delay(5000);
+                Serial.println("Row 238: Disconnecting WiFi...");
+                Serial.println("WiFi: " + String(wifi));
+                Serial.println("Access Point: " + String(accesspoint));
                 disconnect_access_point();
             }
 
@@ -374,6 +386,15 @@ void loop_0_core(void *pvParameters)
                 doc["lat"] = latitude;
                 doc["lon"] = longitude;
                 doc["siv"] = SIV;
+            }
+
+            if (lux)
+            {
+                float lux = lightMeter.readLightLevel();
+                if (lux > 0)
+                {
+                    doc["luminosita"] = lux;
+                }
             }
 
             if (mics4514)
@@ -892,7 +913,7 @@ void create_access_point()
     server.on("/reset", HTTP_GET, [](AsyncWebServerRequest *request)
               { 
               daresettare = true;
-              request->send(200, "text/plain", "reset"); });
+              request->send(200, "text/plain", "ok"); });
 
     server.on("/isGPS", HTTP_GET, [](AsyncWebServerRequest *request)
               { if(GPSsensor)
@@ -1359,6 +1380,8 @@ void check_sensors_diagnostics()
     sd = init_sd_card();
     mics4514 = init_mics();
     ane = check_anemometer();
+    lux = init_luxometer();
+
 #if RELAY == 1
     relay1 = init_relay(RELAY1_PIN);
     relay2 = init_relay(RELAY2_PIN);
@@ -1383,6 +1406,7 @@ void check_sensors_diagnostics()
     checkSensor["scd41"] = scd41;
     checkSensor["gps"] = GPSsensor;
     checkSensor["mics4514"] = mics4514;
+    checkSensor["luxometer"] = lux;
     checkSensor["SD"] = sd;
     if (sd)
     {
@@ -1485,14 +1509,16 @@ void delete_wifi_settings()
 
 void IRAM_ATTR disconnect_access_point()
 {
-    WiFi.softAPdisconnect(true);
+    Serial.println("Disconnecting AP...");
+    server.end();                 // Stop the server
+    WiFi.softAPdisconnect(false); // Disconnect the AP without stopping the WiFi
     delay(1000);
 }
 
 String get_id_square()
 {
     String response = "";
-    const String resource = "/get_ID?mac=" + String(myConcatenation) + "&board=2024V4";
+    const String resource = "/get_ID?mac=" + String(myConcatenation) + "&board=" + verionBoard;
 
     WiFiClient clientWifi;
     HttpClient httpWifi(clientWifi, host, port);
@@ -1516,7 +1542,7 @@ String get_id_square()
         {
             response = httpWifi.responseBody();
 
-            Serial.println(F("Response:"));
+            Serial.print(F("Response from server: "));
             Serial.println(response);
         }
         else
@@ -1589,9 +1615,11 @@ void check_reply_ID()
         connect_wifi_network();
     }
 #if LED_TYPE == 2
+    Serial.println("LED RGB PURPLE WHEN WAITING FOR ID");
     neopixelWrite(LEDRGB_PIN, 255, 0, 255); // Purple when waiting for ID
 #endif
 #if LED_TYPE == 1
+    Serial.println("LED GRB PURPLE WHEN WAITING FOR ID");
     neopixelWrite(LEDRGB_PIN, 0, 255, 255); // Purple when waiting for ID
 #endif
     int countwait = 0;
@@ -1619,11 +1647,13 @@ void check_reply_ID()
     write_string_eeprom(topic, 126);
 
     conf = true;
-    Serial.println("LED RGB GREEN AFTER CONFIGURATION");
+
 #if LED_TYPE == 2
+    Serial.println("LED RGB GREEN AFTER CONFIGURATION");
     neopixelWrite(LEDRGB_PIN, 0, 255, 0);
 #endif
 #if LED_TYPE == 1
+    Serial.println("LED GRB GREEN AFTER CONFIGURATION");
     neopixelWrite(LEDRGB_PIN, 255, 0, 0);
 #endif
     write_conf_eeprom(conf);
@@ -1676,8 +1706,7 @@ void delete_info_sensy()
 void send_sensors_diagnostics()
 {
     String response = "";
-    const String resource = "/set_sensors?sensors=" + String(stringCheckSensor) + "&ID=" + topic + "&versione=" + nameBinESP + "&board=2024V4" + "&info=" + String(stringInfo);
-
+    const String resource = "/set_sensors?sensors=" + String(stringCheckSensor) + "&ID=" + topic + "&versione=" + nameBinESP + "&board=" + verionBoard + "&info=" + String(stringInfo);
     WiFiClient clientWifi;
     HttpClient httpWifi(clientWifi, host, port);
 
@@ -3416,4 +3445,27 @@ void read_anemometer()
     {
         response[i] = 0;
     }
+}
+
+bool init_luxometer()
+{
+
+    if (lightMeter.begin())
+    {
+        // Tentativo di lettura per verificare presenza sensore
+        float lux = lightMeter.readLightLevel();
+        if (lux >= 0.0 && lux < 100000.0)
+        { // range valido
+            Serial.println(F("BH1750 inizializzato correttamente"));
+            return true;
+        }
+    }
+
+    Serial.println(F("Errore: BH1750 non trovato o non risponde"));
+    return false;
+}
+
+float read_luxometer()
+{
+    return lightMeter.readLightLevel();
 }
