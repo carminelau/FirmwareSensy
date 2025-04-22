@@ -1706,7 +1706,7 @@ void delete_info_sensy()
 void send_sensors_diagnostics()
 {
     String response = "";
-    const String resource = "/set_sensors?sensors=" + String(stringCheckSensor) + "&ID=" + topic + "&versione=" + nameBinESP + "&board=" + verionBoard + "&info=" + String(stringInfo);
+    const String resource = "/set_sensors?sensors=" + String(stringCheckSensor) + "&ID=" + topic + "&versione=" + nameBinESP + "&info=" + String(stringInfo);
     WiFiClient clientWifi;
     HttpClient httpWifi(clientWifi, host, port);
 
