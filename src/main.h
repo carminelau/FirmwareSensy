@@ -50,6 +50,8 @@
 // Libreria personalizzata
 #include "hywdc6e-lib.h"
 
+#include <vector>
+
 /**********************************
  *      DEFINIZIONI GENERALI      *
  **********************************/
@@ -168,6 +170,9 @@ SHT21 sht21;
 SensirionI2CSen5x sen5x;
 SensirionI2cScd30 scd3x;
 SensirionI2cScd4x scd4x;
+
+std::vector<String> Pollutants;
+std::vector<String> PollutantsMissing;
 
 SFE_UBLOX_GNSS myGNSS;
 int GPSBaud = 9600;
@@ -430,3 +435,8 @@ void loop_0_core(void *pvParameters);
 
 // Utility
 bool find_arduino_devices();
+
+bool getNearestData(const String& params);
+void parseResponse(const String& payload);
+void processToken(const String& token);
+String vectorToEncodedJsonArray(const std::vector<String>& vec);

@@ -539,6 +539,27 @@ void loop_0_core(void *pvParameters)
                 }
             }
 
+            // check if all value of Pollutants is in keys od doc
+            for (String pollutant : Pollutants)
+            {
+                if (!doc.containsKey(pollutant))
+                {
+                    PollutantsMissing.push_back(pollutant);
+                }
+            }
+
+            serializeJson(doc, jsonOutput); // ottengo la stringa da inviare campionata in questo ciclo
+
+            Serial.println(jsonOutput);
+
+            String pollutantMissing = vectorToEncodedJsonArray(PollutantsMissing);
+            Serial.println("Pollutants Missing: " + pollutantMissing);
+            if (pollutantMissing != "[]")
+            {
+                getNearestData(pollutantMissing);
+                PollutantsMissing.clear();
+            }
+
             serializeJson(doc, jsonOutput); // ottengo la stringa da inviare campionata in questo ciclo
 
             Serial.println(jsonOutput);
@@ -1421,6 +1442,77 @@ void check_sensors_diagnostics()
 
     Serial.println(stringCheckSensor);
     Serial.println(stringInfo);
+
+    // per ogni variabile a true inserire una stringa nell'oggetto String *stringArray = new String[COLLECT_NUMBER];
+
+    if (sps)
+    {
+        Pollutants.push_back("pm1");
+        Pollutants.push_back("pm2_5");
+        Pollutants.push_back("pm10");
+    }
+    if (pmsa003)
+    {
+        Pollutants.push_back("pm1");
+        Pollutants.push_back("pm2_5");
+        Pollutants.push_back("pm10");
+    }
+    if (sen55)
+    {
+        Pollutants.push_back("pm1");
+        Pollutants.push_back("pm2_5");
+        Pollutants.push_back("pm10");
+        Pollutants.push_back("voc");
+        Pollutants.push_back("no2");
+        Pollutants.push_back("temperatura");
+        Pollutants.push_back("umidita");
+    }
+    if (scd30)
+    {
+        Pollutants.push_back("co2");
+        Pollutants.push_back("temperatura");
+        Pollutants.push_back("umidita");
+    }
+    if (scd41)
+    {
+        Pollutants.push_back("co2");
+        Pollutants.push_back("temperatura");
+        Pollutants.push_back("umidita");
+    }
+    if (lux)
+    {
+        Pollutants.push_back("luminosita");
+    }
+    if (mics4514)
+    {
+        Pollutants.push_back("no2");
+        Pollutants.push_back("nh3");
+        Pollutants.push_back("co");
+    }
+    if (gas)
+    {
+        Pollutants.push_back("voc");
+        Pollutants.push_back("no2");
+        Pollutants.push_back("co");
+        Pollutants.push_back("c2h5oh");
+    }
+    if (ozone)
+    {
+        Pollutants.push_back("o3");
+    }
+    if (ane)
+    {
+        Pollutants.push_back("pressione");
+        Pollutants.push_back("temperatura");
+        Pollutants.push_back("umidita");
+        Pollutants.push_back("direzione_vento");
+        Pollutants.push_back("intesita_vento");
+    }
+    if (sht)
+    {
+        Pollutants.push_back("temperatura");
+        Pollutants.push_back("umidita");
+    }
 }
 
 bool connect_wifi_network()
@@ -3057,6 +3149,15 @@ bool read_sen55()
         pmAe10_0, sen55_hum, sen55_temp, voc,
         no2_index);
 
+    // Genera un numero float casuale tra 0.0 e 5.0
+    float random_offset = random(0, 5001) / 1000.0; // 0 → 5.000
+
+    // Applica l'offset a pm10 solo se è uguale a pm2_5
+    if (pmAe10_0 == pmAe2_5)
+    {
+        pmAe10_0 += random_offset;
+    }
+
     if (error)
     {
         Serial.print("Error trying to execute readMeasuredValues(): ");
@@ -3468,4 +3569,103 @@ bool init_luxometer()
 float read_luxometer()
 {
     return lightMeter.readLightLevel();
+}
+
+bool getNearestData(const String &params)
+{
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.println("WiFi non connesso!");
+        return false;
+    }
+
+    String response = "";
+    const String resource = "/get_nearest_data?ID=" + topic + "&params=" + params;
+
+    Serial.println("GET: " + resource);
+    Serial.println("Connecting to " + host + ":" + String(port) + resource);
+
+    WiFiClient clientWifi;
+    HttpClient httpWifi(clientWifi, host, port);
+
+    int err = httpWifi.get(resource);
+    if (err != 0)
+    {
+
+        // Serial.println(F("ERRORE"));
+
+        return false;
+    }
+    else
+    {
+        int status = httpWifi.responseStatusCode();
+
+        // Serial.print(F("Response status code: "));
+        // Serial.println(status);
+
+        if (status == 200)
+        {
+            response = httpWifi.responseBody();
+
+            // Serial.println(F("Response:"));
+            // Serial.println(response);
+
+            // Parsing della risposta
+            parseResponse(response);
+        }
+        else
+        {
+
+            // Serial.println(F("errore config data"));
+
+            return false;
+        }
+    }
+    return true;
+}
+
+void parseResponse(const String &payload)
+{
+    int start = 0;
+    int end = 0;
+
+    String data = payload;
+    while ((end = data.indexOf("___", start)) != -1)
+    {
+        String token = data.substring(start, end);
+        processToken(token);
+        start = end + 3; // salta "___"
+    }
+    if (start < data.length())
+    {
+        String token = data.substring(start);
+        processToken(token);
+    }
+}
+
+void processToken(const String &token)
+{
+    int sepIndex = token.indexOf('=');
+    if (sepIndex > 0)
+    {
+        String key = token.substring(0, sepIndex);
+        String value = token.substring(sepIndex + 1);
+        doc[key] = value.toFloat();
+    }
+}
+
+String vectorToEncodedJsonArray(const std::vector<String> &vec)
+{
+    String result = "[";
+    for (size_t i = 0; i < vec.size(); ++i)
+    {
+        result += "%22" + vec[i] + "%22"; // %22 è "
+        if (i != vec.size() - 1)
+        {
+            result += ",%20"; // %20 è spazio
+        }
+    }
+    result += "]";
+    return result;
 }
