@@ -436,7 +436,7 @@ void loop_0_core(void *pvParameters);
 // Utility
 bool find_arduino_devices();
 
-bool getNearestData(const String& params);
-void parseResponse(const String& payload);
-void processToken(const String& token);
-String vectorToEncodedJsonArray(const std::vector<String>& vec);
+bool get_nearest_data(const String& params);
+void parse_response(const String& payload);
+void process_token(const String& token);
+String vector_to_encoded_json_array(const std::vector<String>& vec);

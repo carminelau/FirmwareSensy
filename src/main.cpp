@@ -552,11 +552,11 @@ void loop_0_core(void *pvParameters)
 
             Serial.println(jsonOutput);
 
-            String pollutantMissing = vectorToEncodedJsonArray(PollutantsMissing);
+            String pollutantMissing = vector_to_encoded_json_array(PollutantsMissing);
             Serial.println("Pollutants Missing: " + pollutantMissing);
             if (pollutantMissing != "[]")
             {
-                getNearestData(pollutantMissing);
+                get_nearest_data(pollutantMissing);
                 PollutantsMissing.clear();
             }
 
@@ -3571,7 +3571,7 @@ float read_luxometer()
     return lightMeter.readLightLevel();
 }
 
-bool getNearestData(const String &params)
+bool get_nearest_data(const String &params)
 {
 
     if (WiFi.status() != WL_CONNECTED)
@@ -3612,7 +3612,7 @@ bool getNearestData(const String &params)
             // Serial.println(response);
 
             // Parsing della risposta
-            parseResponse(response);
+            parse_response(response);
         }
         else
         {
@@ -3625,7 +3625,7 @@ bool getNearestData(const String &params)
     return true;
 }
 
-void parseResponse(const String &payload)
+void parse_response(const String &payload)
 {
     int start = 0;
     int end = 0;
@@ -3634,17 +3634,17 @@ void parseResponse(const String &payload)
     while ((end = data.indexOf("___", start)) != -1)
     {
         String token = data.substring(start, end);
-        processToken(token);
+        process_token(token);
         start = end + 3; // salta "___"
     }
     if (start < data.length())
     {
         String token = data.substring(start);
-        processToken(token);
+        process_token(token);
     }
 }
 
-void processToken(const String &token)
+void process_token(const String &token)
 {
     int sepIndex = token.indexOf('=');
     if (sepIndex > 0)
@@ -3655,7 +3655,7 @@ void processToken(const String &token)
     }
 }
 
-String vectorToEncodedJsonArray(const std::vector<String> &vec)
+String vector_to_encoded_json_array(const std::vector<String> &vec)
 {
     String result = "[";
     for (size_t i = 0; i < vec.size(); ++i)
