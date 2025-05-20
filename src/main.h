@@ -81,30 +81,31 @@
  *     STRUTTURE DATI SENSORI     *
  **********************************/
 // Anemometro
-struct dataset_t {
-  uint16_t DeviceState;
-  uint16_t WindDirection;
-  float WindSpeed;
-  float Temperature;
-  float Humidity;
-  float AirPressure;
-  uint16_t CompassHeading;
-  uint16_t PrecipitationType;
-  float PrecipitationIntensity;
-  float AccumulatedPrecepitation;
-  uint16_t IntensityUnit;
-  uint16_t GpsStatus;
-  float GpsSpeed;
-  uint16_t GpsHeading;
-  float Longitude;
-  float Latitude;
-  float DiustConcentration;
-  float Visibility;
-  float Luminance;
-  float AccumulatedSolarRadiation;
-  float RadiationPower;
-  uint16_t CompassCorrectedWindDirection;
-  float Altitude;
+struct dataset_t
+{
+    uint16_t DeviceState;
+    uint16_t WindDirection;
+    float WindSpeed;
+    float Temperature;
+    float Humidity;
+    float AirPressure;
+    uint16_t CompassHeading;
+    uint16_t PrecipitationType;
+    float PrecipitationIntensity;
+    float AccumulatedPrecepitation;
+    uint16_t IntensityUnit;
+    uint16_t GpsStatus;
+    float GpsSpeed;
+    uint16_t GpsHeading;
+    float Longitude;
+    float Latitude;
+    float DiustConcentration;
+    float Visibility;
+    float Luminance;
+    float AccumulatedSolarRadiation;
+    float RadiationPower;
+    uint16_t CompassCorrectedWindDirection;
+    float Altitude;
 };
 
 /**********************************
@@ -127,7 +128,7 @@ String nameBinESP = "";
 String nameBinServer;
 String topicListen;
 String timezone_it = "CET-1CEST,M3.5.0,M10.5.0/3";
-const char* verionBoard = STR(YEAR) "V" STR(VERSION);
+const char *verionBoard = STR(YEAR) "V" STR(VERSION);
 
 /**********************************
  *     VARIABILI DI STATO         *
@@ -262,26 +263,22 @@ const float gm102b_rh_offset[4][7] PROGMEM = {
     {-10.0, 0.0, 10.0, 20.0, 30.0, 40.0, 50.0},
     {1.71, 1.58, 1.45, 1.39, 1.12, 1.00, 0.89},
     {1.49, 1.32, 1.28, 1.08, 0.99, 0.88, 0.71},
-    {1.28, 1.15, 10.9, 0.90, 0.86, 0.71, 0.68}
-};
+    {1.28, 1.15, 10.9, 0.90, 0.86, 0.71, 0.68}};
 
 const float gm102b_u2gas[2][12] PROGMEM = {
     {0.0, 0.21, 0.39, 0.7, 0.95, 1.15, 1.35, 1.45, 1.6, 1.69, 1.79, 1.81},
-    {0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0}
-};
+    {0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0}};
 
 // Ethanol – GM302B
 const float gm302b_rh_offset[4][13] PROGMEM = {
     {-10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0},
     {1.71, 1.61, 1.58, 1.50, 1.42, 1.30, 1.25, 1.18, 1.15, 1.12, 1.00, 0.92, 0.88},
     {1.45, 1.36, 1.33, 1.28, 1.20, 1.11, 1.08, 1.00, 0.98, 0.95, 0.85, 0.79, 0.73},
-    {1.27, 1.20, 1.18, 1.10, 1.05, 0.95, 0.92, 0.88, 0.86, 0.81, 0.72, 0.69, 0.64}
-};
+    {1.27, 1.20, 1.18, 1.10, 1.05, 0.95, 0.92, 0.88, 0.86, 0.81, 0.72, 0.69, 0.64}};
 
 const float gm302b_u2gas[2][11] PROGMEM = {
     {1.25, 1.5, 2.0, 2.25, 2.5, 3.1, 3.3, 3.6, 3.7, 3.8, 3.85},
-    {0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0}
-};
+    {0.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0}};
 
 const float gm502b_rh_offset[4][13] PROGMEM = {
     {-10.0, -5.0, 0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0},  // °C
@@ -411,6 +408,9 @@ void write_file_data(char *jsonString);
 bool init_sd_card();
 void send_data_from_storage(fs::FS &fs);
 int get_count_data_saved(fs::FS &fs);
+File find_bin_file(fs::FS &fs, const char *path);
+File find_first_bin_file(fs::FS &fs, const char *directory, String &foundFilePath);
+void updateFromFile(File updateBin, const char *filePath);
 
 // Pulsanti
 void read_reset_button();
@@ -436,7 +436,7 @@ void loop_0_core(void *pvParameters);
 // Utility
 bool find_arduino_devices();
 
-bool get_nearest_data(const String& params);
-void parse_response(const String& payload);
-void process_token(const String& token);
-String vector_to_encoded_json_array(const std::vector<String>& vec);
+bool get_nearest_data(const String &params);
+void parse_response(const String &payload);
+void process_token(const String &token);
+String vector_to_encoded_json_array(const std::vector<String> &vec);

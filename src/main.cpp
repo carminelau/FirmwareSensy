@@ -111,6 +111,26 @@ void setup()
         }
     }
 
+    if (sd)
+    {
+        String binFilePath = "";
+        File updateBin = find_first_bin_file(SD, "/", binFilePath);
+
+        if (updateBin)
+        {
+            // check if the name of the file is the same as nameBinESP
+            if (!(String(binFilePath).indexOf(nameBinESP) != -1))
+            {
+                Serial.println("Update from SD card with different name");
+                updateFromFile(updateBin, binFilePath.c_str());
+            }
+        }
+        else
+        {
+            Serial.println("Nessun file .bin trovato, nessun aggiornamento eseguito.");
+        }
+    }
+
     Serial.println("-------------------------------------");
     Serial.println("|       PARAMETER SETTINGS         |");
     Serial.println("-------------------------------------");
@@ -267,6 +287,25 @@ void loop_0_core(void *pvParameters)
                     if (wifi)
                     {
                         check_update_OTA();
+                    }
+                }
+                if (sd)
+                {
+                    String binFilePath = "";
+                    File updateBin = find_first_bin_file(SD, "/", binFilePath);
+
+                    if (updateBin)
+                    {
+                        // check if the name of the file is the same as nameBinESP
+                        if (!(String(binFilePath).indexOf(nameBinESP) != -1))
+                        {
+                            Serial.println("Update from SD card with different name");
+                            updateFromFile(updateBin, binFilePath.c_str());
+                        }
+                    }
+                    else
+                    {
+                        Serial.println("Nessun file .bin trovato, nessun aggiornamento eseguito.");
                     }
                 }
             }
@@ -3668,4 +3707,130 @@ String vector_to_encoded_json_array(const std::vector<String> &vec)
     }
     result += "]";
     return result;
+}
+
+File find_bin_file(fs::FS &fs, const char *path)
+{
+    Serial.printf("Searching for file: %s\r\n", path);
+    File file = fs.open(path);
+
+    if (!file || file.isDirectory())
+    {
+        Serial.println("- failed to open file or path is a directory");
+        return File();
+    }
+
+    Serial.println("- file found and opened successfully");
+    return file;
+}
+
+File find_first_bin_file(fs::FS &fs, const char *directory, String &foundFilePath)
+{
+    Serial.printf("Scanning directory: %s\r\n", directory);
+    File root = fs.open(directory);
+
+    if (!root || !root.isDirectory())
+    {
+        Serial.println("- failed to open directory");
+        return File();
+    }
+
+    File file = root.openNextFile();
+    while (file)
+    {
+        if (!file.isDirectory())
+        {
+            String filename = file.name();
+            if (filename.endsWith(".bin"))
+            {
+                Serial.printf("- found bin file: %s\n", filename.c_str());
+                foundFilePath = filename;
+                return file;
+            }
+        }
+        file = root.openNextFile();
+    }
+
+    Serial.println("- no .bin file found in directory");
+    return File();
+}
+
+void updateFromFile(File updateBin, const char *filePath)
+{
+    if (!updateBin)
+    {
+        Serial.println("Error: File not valid");
+        return;
+    }
+
+    size_t updateSize = updateBin.size();
+
+    if (updateSize == 0)
+    {
+        Serial.println("Error: File .bin empty");
+        updateBin.close();
+        return;
+    }
+
+    Serial.printf("Start update (%d bytes)...\n", updateSize);
+
+    if (Update.begin(updateSize))
+    {
+        size_t written = 0;
+        uint8_t buf[512];
+        size_t len = 0;
+
+        while ((len = updateBin.read(buf, sizeof(buf))) > 0)
+        {
+            Update.write(buf, len);
+            written += len;
+
+            // Progress bar in percentuale
+            int progress = (written * 100) / updateSize;
+            Serial.printf("\rProgress: %d%%", progress);
+        }
+
+        Serial.println();
+
+        if (Update.end())
+        {
+            if (Update.isFinished())
+            {
+                Serial.println("Update complete, delete the file...");
+                updateBin.close();
+
+                // aggiungi lo / all'inizio del path
+                String filePathStr = String(filePath);
+                if (filePathStr.charAt(0) != '/')
+                {
+                    filePathStr = "/" + filePathStr;
+                }
+
+                // Elimina il file dalla SD
+                delete_file_storage(SD, filePathStr.c_str());
+
+                // scrivi il nuovo nome nell'eeprom
+                char buffer[22];
+                snprintf(buffer, sizeof(buffer), "%s", String(filePath).c_str());
+                write_string_eeprom(buffer, 104);
+
+                Serial.println("Riavvio...");
+                ESP.restart();
+            }
+            else
+            {
+                Serial.println("Aggiornamento non completato.");
+            }
+        }
+        else
+        {
+            Serial.printf("Errore nell'update: %s\n", Update.errorString());
+        }
+    }
+    else
+    {
+        Serial.println("Errore nell'inizializzare l'update");
+    }
+
+    updateBin.close();
 }
