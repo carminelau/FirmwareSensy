@@ -90,8 +90,6 @@ void setup()
 
     init_spiffs();
     delay(500);
-    check_sensors_diagnostics();
-    delay(500);
 
     topicListen = topic + "GESTORE";
     configTime(0, 0, ntpServer, ntpServer2);
@@ -122,6 +120,11 @@ void setup()
             if (!(String(binFilePath).indexOf(nameBinESP) != -1))
             {
                 Serial.println("Update from SD card with different name");
+                updateFromFile(updateBin, binFilePath.c_str());
+            }
+            else
+            {
+                Serial.println("Update from SD card with same name");
                 updateFromFile(updateBin, binFilePath.c_str());
             }
         }
@@ -271,6 +274,8 @@ void loop_0_core(void *pvParameters)
 
             if (resetCount == 0)
             {
+                check_sensors_diagnostics();
+                delay(500);
                 send_sensors_diagnostics();
                 delay(500);
                 init_rtc();
@@ -300,6 +305,11 @@ void loop_0_core(void *pvParameters)
                         if (!(String(binFilePath).indexOf(nameBinESP) != -1))
                         {
                             Serial.println("Update from SD card with different name");
+                            updateFromFile(updateBin, binFilePath.c_str());
+                        }
+                        else
+                        {
+                            Serial.println("Update from SD card with same name");
                             updateFromFile(updateBin, binFilePath.c_str());
                         }
                     }
@@ -402,6 +412,10 @@ void loop_0_core(void *pvParameters)
             {
                 read_anemometer();
             }
+            if (soil)
+            {
+                read_soil_moisture();
+            }
 
             epochs = get_epoch();
             if (epochs == 0)
@@ -470,11 +484,11 @@ void loop_0_core(void *pvParameters)
             {
                 float temp = sht21.getTemperature();
                 float hum = sht21.getHumidity();
-                if (temp > -20)
+                if (temp > -20 && temp < 100)
                 {
                     doc["temperatura"] = temp;
                 }
-                if (hum > 10)
+                if (hum > 10 && hum < 101)
                 {
                     doc["umidita"] = hum;
                 }
@@ -482,15 +496,15 @@ void loop_0_core(void *pvParameters)
 
             if (scd30)
             {
-                if (scd30_temp > -20)
+                if (scd30_temp > -20 && scd30_temp < 100)
                 {
                     doc["temperatura"] = scd30_temp;
                 }
-                if (scd30_hum > 10)
+                if (scd30_hum > 10 && scd30_hum < 101)
                 {
                     doc["umidita"] = scd30_hum;
                 }
-                if (scd30_co2 > 0)
+                if (scd30_co2 > 0 && scd30_co2 < 10000)
                 {
                     doc["co2"] = scd30_co2;
                 }
@@ -498,15 +512,15 @@ void loop_0_core(void *pvParameters)
 
             if (scd41)
             {
-                if (scd41_temp > -20)
+                if (scd41_temp > -20 && scd41_temp < 100)
                 {
                     doc["temperatura"] = scd41_temp;
                 }
-                if (scd41_hum > 10)
+                if (scd41_hum > 10 && scd41_hum < 101)
                 {
                     doc["umidita"] = scd41_hum;
                 }
-                if (scd41_co2 > 0)
+                if (scd41_co2 > 0 && scd41_co2 < 10000)
                 {
                     doc["co2"] = scd41_co2;
                 }
@@ -518,7 +532,7 @@ void loop_0_core(void *pvParameters)
                 {
                     doc["no2"] = no2;
                 }
-                if (voc > 0)
+                if (voc > 0 && voc < 1000)
                 {
                     doc["voc"] = voc;
                 }
@@ -526,7 +540,7 @@ void loop_0_core(void *pvParameters)
                 {
                     doc["co"] = co;
                 }
-                if (c2h5oh > 0)
+                if (c2h5oh > 0 && c2h5oh < 1000)
                 {
                     doc["c2h5oh"] = c2h5oh;
                 }
@@ -534,19 +548,19 @@ void loop_0_core(void *pvParameters)
 
             if (sen55)
             {
-                if (sen55_temp > -20)
+                if (sen55_temp > -20 && sen55_temp < 100)
                 {
                     doc["temperatura"] = sen55_temp;
                 }
-                if (sen55_hum > 10)
+                if (sen55_hum > 10 && sen55_hum < 101)
                 {
                     doc["umidita"] = sen55_hum;
                 }
-                if (voc > 0)
+                if (voc > 0 && voc < 1000)
                 {
                     doc["voc"] = voc;
                 }
-                if (no2_index > 0)
+                if (no2_index > 0 && no2_index < 1000)
                 {
                     doc["no2"] = no2_index;
                 }
@@ -554,15 +568,15 @@ void loop_0_core(void *pvParameters)
 
             if (ane)
             {
-                if (temperature_ane > -20)
+                if (temperature_ane > -20 && temperature_ane < 100)
                 {
                     doc["temperatura"] = temperature_ane;
                 }
-                if (humidity_ane > 0)
+                if (humidity_ane > 0 && humidity_ane < 101)
                 {
                     doc["umidita"] = humidity_ane;
                 }
-                if (pressure_ane > 800)
+                if (pressure_ane > 800 && pressure_ane < 1200) 
                 {
                     doc["pressione"] = pressure_ane;
                 }
@@ -572,9 +586,40 @@ void loop_0_core(void *pvParameters)
             }
             if (ozone)
             {
-                if (O3 > 0)
+                if (O3 > 0 && O3 < 10000)
                 {
                     doc["o3"] = O3;
+                }
+            }
+            if (soil)
+            {
+                if (soil_ph > 0 && soil_ph < 14)
+                {
+                    doc["soil_ph"] = soil_ph;
+                }
+                if (soil_temperature > -3 && soil_temperature < 100)
+                {
+                    doc["soil_temp"] = soil_temperature;
+                }
+                if (soil_humidity > 0 && soil_humidity < 101)
+                {
+                    doc["soil_hum"] = soil_humidity;
+                }
+                if (soil_conductivity > 0 && soil_conductivity < 1000)
+                {
+                    doc["soil_cond"] = soil_conductivity;
+                }
+                if (soil_nitrogen > 0 && soil_nitrogen < 1000)
+                {
+                    doc["soil_nitrogen"] = soil_nitrogen;
+                }
+                if (soil_phosphorus > 0 && soil_phosphorus < 1000)
+                {
+                    doc["soil_phosphorus"] = soil_phosphorus;
+                }
+                if (soil_potassium > 0 && soil_potassium < 1000)
+                {
+                    doc["soil_potassium"] = soil_potassium;
                 }
             }
 
@@ -665,6 +710,7 @@ void loop_1_core(void *pvParameters)
 {
     Serial.print("Task2 running on core ");
     Serial.println(xPortGetCoreID());
+    int num_it = 0;
     for (;;)
     {
         if (GPSsensor)
@@ -985,42 +1031,9 @@ void create_access_point()
               { request->send(200, "text/plain", myConcatenation); });
 
     server.on("/scanWifi", HTTP_GET, [](AsyncWebServerRequest *request)
-              {
-    String json = "[";
-    
-    for (int j = 0; j < 10; j++){
-      int n = WiFi.scanComplete();
-      Serial.println(n);
-      if (n == -2)
-      {
-        WiFi.scanNetworks(true);
-      }
-      else if (n)
-      {
-        Serial.println("WiFi Found: " + String(n));
-        for (int i = 0; i < n; ++i)
-        {
-          if (i)
-            json += ",";
-          json += "{";
-          json += "\"ssid\":\"" + WiFi.SSID(i) + "\"";
-          json += ",\"rssi\":" + String(WiFi.RSSI(i));
-          json += ",\"bssid\":\"" + WiFi.BSSIDstr(i) + "\"";
-          json += ",\"channel\":" + String(WiFi.channel(i));
-          json += ",\"secure\":" + String(WiFi.encryptionType(i));
-          json += "}";
-        }
-        WiFi.scanDelete();
-        if (WiFi.scanComplete() == -2)
-        {
-          WiFi.scanNetworks(true);
-        }
-        break;
-      }
-    }
-    
-    json += "]";
-    request->send(200, "text/json", json); });
+              { 
+                jsonWifi = get_list_wifi();
+                request->send(200, "text/json", jsonWifi); });
 
     server.on("/configWifi", HTTP_POST, [](AsyncWebServerRequest *request)
               {
@@ -1193,18 +1206,17 @@ bool check_anemometer()
 {
     Serial.println("Initializing HYWDC6E sensor...");
 
-    // Inizializza la comunicazione RS485
-    init_hywdc6e(DE_PIN, RE_PIN, DI_PIN, RO_PIN);
+    AnemometerData anemData = sensors.readAnemometer(9600);
+    sensors.printAnemometerData(anemData);
 
-    // Verifica la connessione
-    if (is_connected())
+    if (anemData.valid)
     {
-        Serial.println("Sensor connected successfully.");
+        Serial.println("Anemometer initialized successfully.");
         return true;
     }
     else
     {
-        Serial.println("Failed to connect to sensor.");
+        Serial.println("Failed to initialize Anemometer.");
         return false;
     }
 }
@@ -1424,6 +1436,16 @@ void check_sensors_diagnostics()
     // clear the json object
     checkSensor.clear();
     info.clear();
+    sensors.begin();
+    sensors.enableDebug(true); // Abilita output debug
+
+#if RELAY == 1
+    relay1 = init_relay(RELAY1_PIN);
+    relay2 = init_relay(RELAY2_PIN);
+#else
+    relay1 = false;
+    relay2 = false;
+#endif
 
     Serial.println("START INITIALIZATION SENSORS");
 
@@ -1440,15 +1462,10 @@ void check_sensors_diagnostics()
     sd = init_sd_card();
     mics4514 = init_mics();
     ane = check_anemometer();
+    delay(1000);
+    soil = check_soil_moisture();
+    // soil = true;
     lux = init_luxometer();
-
-#if RELAY == 1
-    relay1 = init_relay(RELAY1_PIN);
-    relay2 = init_relay(RELAY2_PIN);
-#else
-    relay1 = false;
-    relay2 = false;
-#endif
 
     saveCounterSD = get_count_data_saved(SD);
     saveCounterSPIFFS = get_count_data_saved(SPIFFS);
@@ -1467,6 +1484,7 @@ void check_sensors_diagnostics()
     checkSensor["gps"] = GPSsensor;
     checkSensor["mics4514"] = mics4514;
     checkSensor["luxometer"] = lux;
+    checkSensor["soil_moisure"] = soil;
     checkSensor["SD"] = sd;
     if (sd)
     {
@@ -3538,25 +3556,20 @@ int get_count_data_saved(fs::FS &fs)
 
 void read_anemometer()
 {
-    uint8_t response[256];
-    size_t bytesRead = 0;
-
     // Invia la richiesta Modbus e ottieni la risposta
-    sendModbusRequest();
-    Serial.println("Request sent. Waiting for response...");
-    get_raw_response(response, sizeof(response), &bytesRead);
-    Serial.println("Response received. Decoding...");
+    AnemometerData anemData = sensors.readAnemometer(9600);
+    sensors.printAnemometerData(anemData);
 
-    if (bytesRead > 0)
+    if (anemData.valid)
     {
         Serial.println("Response received. Decoding...");
 
         // Leggi i parametri dalla risposta
-        windDirection_ane = get_wind_direction(response);
-        windSpeed_ane = get_wind_speed(response);
-        temperature_ane = get_temperature(response);
-        humidity_ane = get_humidity(response);
-        pressure_ane = get_pressure(response);
+        windDirection_ane = anemData.windDirection;
+        windSpeed_ane = anemData.windSpeed;
+        temperature_ane = anemData.temperature;
+        humidity_ane = anemData.humidity;
+        pressure_ane = anemData.pressure;
 
         // Stampa i valori letti
         Serial.println("Sensor Data:");
@@ -3579,11 +3592,6 @@ void read_anemometer()
     else
     {
         Serial.println("No valid response received.");
-    }
-
-    for (int i = 0; i < bytesRead; i++)
-    {
-        response[i] = 0;
     }
 }
 
@@ -3833,4 +3841,101 @@ void updateFromFile(File updateBin, const char *filePath)
     }
 
     updateBin.close();
+}
+
+void read_soil_moisture()
+{
+    SoilSensorData soilData = sensors.readSoilSensor(4800);
+    sensors.printSoilSensorData(soilData);
+
+    if (soilData.valid)
+    {
+        Serial.println("Response received. Decoding...");
+
+        // Leggi i parametri dalla risposta
+        soil_ph = soilData.ph;
+        soil_conductivity = soilData.ec;
+        soil_temperature = soilData.temperature;
+        soil_nitrogen = soilData.nitrogen;
+        soil_phosphorus = soilData.phosphorus;
+        soil_potassium = soilData.potassium;
+        soil_humidity = soilData.humidity;
+    }
+    else
+    {
+        Serial.println("No valid response received.");
+    }
+}
+
+bool check_soil_moisture()
+{
+    // esegui per tre volte la lettura del sensore e controlla se almeno in uno il campo valid è a true
+    for (int i = 0; i < 3; i++)
+    {
+        SoilSensorData soilData = sensors.readSoilSensor(4800);
+        sensors.printSoilSensorData(soilData);
+
+        if (soilData.valid)
+        {
+            return true; // almeno una lettura valida
+        }
+    }
+
+    return false; // nessuna lettura valida
+}
+
+String get_list_wifi()
+{
+    const int MAX_RETRIES = 5;
+    const int SCAN_TIMEOUT_MS = 200;
+
+    // Avvia la scansione se non è già in corso
+    if (WiFi.scanComplete() == -2)
+    {
+        WiFi.scanNetworks(true);
+    }
+
+    // Attendi il completamento della scansione con timeout
+    int retry_count = 0;
+    int n = WiFi.scanComplete();
+
+    while (n <= 0 && retry_count < MAX_RETRIES)
+    {
+        delay(SCAN_TIMEOUT_MS); // todo provare a mettere dopo scanComplete
+        n = WiFi.scanComplete();
+        retry_count++;
+    }
+
+    // Se la scansione non è completata o non ha trovato reti
+    if (n <= 0)
+    {
+        WiFi.scanDelete();
+        return "[]"; // Array JSON vuoto
+    }
+
+    // Costruisci il JSON
+    String json = "[";
+
+    for (int i = 0; i < n; i++)
+    {
+        if (i > 0)
+        {
+            json += ",";
+        }
+
+        json += "{";
+        json += "\"ssid\":\"" + WiFi.SSID(i) + "\"";
+        json += ",\"rssi\":" + String(WiFi.RSSI(i));
+        json += ",\"bssid\":\"" + WiFi.BSSIDstr(i) + "\"";
+        json += ",\"channel\":" + String(WiFi.channel(i));
+        json += ",\"secure\":" + String(WiFi.encryptionType(i));
+        json += "}";
+    }
+
+    json += "]";
+
+    // Pulisci i risultati della scansione
+    WiFi.scanDelete();
+
+    return json;
 }

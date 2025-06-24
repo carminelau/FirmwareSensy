@@ -20,6 +20,7 @@
 #include <SensirionI2cScd30.h>
 #include <SensirionI2cScd4x.h>
 #include <BH1750.h>
+#include <ModbusSensorLibrary.h>
 
 // Libreria GPS
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
@@ -48,7 +49,7 @@
 #include "ArduinoJson.h"
 
 // Libreria personalizzata
-#include "hywdc6e-lib.h"
+//#include "hywdc6e-lib.h"
 
 #include <vector>
 
@@ -133,7 +134,7 @@ const char *verionBoard = STR(YEAR) "V" STR(VERSION);
 /**********************************
  *     VARIABILI DI STATO         *
  **********************************/
-bool sps, ozone, pmsa003, gas, sht, ane, low, lux;
+bool sps, ozone, pmsa003, gas, sht, ane, low, lux, soil;
 bool sen55, scd30, scd41, mics4514;
 bool accesspoint, relay1, relay2;
 
@@ -171,6 +172,7 @@ SHT21 sht21;
 SensirionI2CSen5x sen5x;
 SensirionI2cScd30 scd3x;
 SensirionI2cScd4x scd4x;
+ModbusSensorLibrary sensors(RO_PIN, DI_PIN, DE_PIN, RE_PIN);
 
 std::vector<String> Pollutants;
 std::vector<String> PollutantsMissing;
@@ -222,6 +224,15 @@ float temperature_ane;
 float humidity_ane;
 float pressure_ane;
 
+// Soil Moisture
+float soil_ph = 0.0;
+float soil_temperature = 0.0;
+float soil_humidity = 0.0;
+int soil_conductivity = 0.0;
+float soil_nitrogen = 0.0;
+float soil_phosphorus = 0.0;
+float soil_potassium = 0.0;
+
 /**********************************
  *         GESTIONE JSON          *
  **********************************/
@@ -231,6 +242,8 @@ JsonDocument info;
 char stringCheckSensor[512];
 char stringInfo[512];
 char jsonOutput[512];
+
+String jsonWifi = "";
 
 /**********************************
  *     CONFIGURAZIONE RETE        *
@@ -426,6 +439,10 @@ void check_pressing_button();
 // Anemometro
 void read_anemometer();
 
+// Soil Moisture
+bool check_soil_moisture();
+void read_soil_moisture();
+
 // Rele
 bool init_relay(int relayPin);
 
@@ -440,3 +457,4 @@ bool get_nearest_data(const String &params);
 void parse_response(const String &payload);
 void process_token(const String &token);
 String vector_to_encoded_json_array(const std::vector<String> &vec);
+String get_list_wifi();
