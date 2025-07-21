@@ -34,9 +34,6 @@ void setup()
 
     check_vergin_eeprom();
 
-    pinMode(PMS_SET_PIN, OUTPUT);
-
-    digitalWrite(PMS_SET_PIN, HIGH);
     // delete_info_sensy();
     // delete_wifi_settings();
 
@@ -87,6 +84,7 @@ void setup()
     init_i2c();
     init_mqtt();
     delay(500);
+    GPSsensor = init_gps();
 
     init_spiffs();
     delay(500);
@@ -160,8 +158,6 @@ void setup()
     Serial.println(psswdAP);
     Serial.println("-------------------------------------");
 
-    digitalWrite(PMS_SET_PIN, LOW);
-
     xTaskCreatePinnedToCore(
         loop_0_core, /* Task function. */
         "Task1",     /* name of task. */
@@ -181,9 +177,6 @@ void loop_0_core(void *pvParameters)
 {
     for (;;)
     {
-
-        digitalWrite(PMS_SET_PIN, LOW);
-
         Serial.print(F("Task1 started on core "));
         Serial.println(xPortGetCoreID());
 
@@ -322,7 +315,6 @@ void loop_0_core(void *pvParameters)
 
             if (pmsa003)
             {
-                digitalWrite(PMS_SET_PIN, HIGH);
                 delay(4500);
             }
 
@@ -403,7 +395,6 @@ void loop_0_core(void *pvParameters)
                 nh3 = read_mics(NH3, "NH3");
             }
 
-            digitalWrite(PMS_SET_PIN, LOW);
             if (sps)
             {
                 print_sps30_values(pmAe1_0, pmAe2_5, pmAe10_0);
