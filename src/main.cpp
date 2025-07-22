@@ -663,7 +663,7 @@ void loop_0_core(void *pvParameters)
 
                 if (low)
                 {
-                    setCpuFrequencyMhz(60);
+                    setCpuFrequencyMhz(80);
                 }
                 Serial.print("LISTEN MQTT ");
                 Serial.println(millis());
@@ -688,6 +688,11 @@ void loop_0_core(void *pvParameters)
                 if (low)
                 {
                     WiFi.disconnect();
+                    if (sen55)
+                    {
+                        sen5x.setFanAutoCleaningInterval(0); // disabilito la pulizia automatica della ventola
+                        sen5x.stopMeasurement(); // stop del sensore SEN55
+                    }
                     setCpuFrequencyMhz(10);
 
                     esp_deep_sleep_start();
