@@ -573,7 +573,7 @@ void loop_0_core(void *pvParameters)
                 }
 
                 doc["direzione_vento"] = dir_wind_fix(windDirection_ane);
-                doc["intesita_vento"] = windSpeed_ane;
+                doc["intensita_vento"] = windSpeed_ane;
             }
             if (ozone)
             {
@@ -1554,7 +1554,7 @@ void check_sensors_diagnostics()
         Pollutants.push_back("temperatura");
         Pollutants.push_back("umidita");
         Pollutants.push_back("direzione_vento");
-        Pollutants.push_back("intesita_vento");
+        Pollutants.push_back("intensita_vento");
     }
     if (sht)
     {
