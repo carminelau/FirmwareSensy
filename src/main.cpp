@@ -1480,7 +1480,7 @@ void check_sensors_diagnostics()
     checkSensor["gps"] = GPSsensor;
     checkSensor["mics4514"] = mics4514;
     checkSensor["luxometer"] = lux;
-    checkSensor["soil_moisure"] = soil;
+    checkSensor["soil_moisture"] = soil;
     checkSensor["SD"] = sd;
     if (sd)
     {
