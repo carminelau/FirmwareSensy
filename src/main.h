@@ -196,8 +196,14 @@ float O3 = 0.0;
 float adc1_O3, adc2_O3;
 
 // Multigas
-float no2, c2h5oh, voc, co, no2_index;
+float no2, c2h5oh, voc, co;
 float nh3;
+
+// Calibration constants from PDF
+float GM102B_init = 1.41, GM102B_dV = -1.03, GM102B_ppm = 5;
+float GM302B_init = 0.94, GM302B_dV = -0.46, GM302B_ppm = 50;
+float GM502B_init = 1.42, GM502B_dV = -0.89, GM502B_ppm = 50;
+float GM702B_init = 1.22, GM702B_dV = 0.87, GM702B_ppm = 150;
 
 // PMS/SPS
 float pmAe1_0, pmAe2_5, pmAe10_0;
@@ -206,6 +212,8 @@ float pmAe1_0Test, pmAe2_5Test, pmAe10_0Test;
 // SEN55
 float sen55_temp = 0.0;
 float sen55_hum = 0.0;
+float no2_index = 0;
+float voc_index = 0;
 
 // SCD30
 float scd30_temp = 0.0;
@@ -378,6 +386,8 @@ float read_luxometer();
 
 void check_sensors_diagnostics();
 void send_sensors_diagnostics();
+
+float calibrate(float raw, float init, float dV, float ppm);
 
 // GPS
 bool init_gps();

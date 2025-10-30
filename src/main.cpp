@@ -547,13 +547,13 @@ void loop_0_core(void *pvParameters)
                 {
                     doc["umidita"] = sen55_hum;
                 }
-                if (voc > 0 && voc < 1000)
+                if (voc_index > 0 && voc_index < 1000)
                 {
-                    doc["voc"] = voc;
+                    doc["voc_index"] = voc_index;
                 }
                 if (no2_index > 0 && no2_index < 1000)
                 {
-                    doc["no2"] = no2_index;
+                    doc["nox_index"] = no2_index;
                 }
             }
 
@@ -2254,16 +2254,35 @@ float get_co_ppm(uint32_t raw, float temp, float humidity)
     return return_ppm_gas_value(co_corr, (float *)gm702b_u2gas, 9);
 }
 
+float calibrate(float raw, float init, float dV, float ppm) {
+  return (raw - init) * (ppm / dV);
+}
+
 void read_multigas()
 {
-    no2 = get_no2_ppm(sensore.getGM102B(), sht21.getTemperature(), sht21.getHumidity());
-    co = get_co_ppm(sensore.getGM702B(), sht21.getTemperature(), sht21.getHumidity());
+    sensore.preheated();
+    delay(1000);
+    sensore.unPreheated();
+    delay(1000);
+
+    float raw_no2 = sensore.getGM102B() / 100.0;
+    no2 = calibrate(raw_no2, GM102B_init, GM102B_dV, GM102B_ppm);
+    
+    float raw_co = sensore.getGM702B() / 100.0;
+    co = calibrate(raw_co, GM702B_init, GM702B_dV, GM702B_ppm);
+
+    float raw_voc = sensore.getGM502B() / 100.0;
+    voc = calibrate(raw_voc, GM502B_init, GM502B_dV, GM502B_ppm);
+    
+    // no2 = get_no2_ppm(sensore.getGM102B(), sen55_temp, sen55_hum);
+    // co = get_co_ppm(sensore.getGM702B(), sen55_temp, sen55_hum);
+    // voc = get_voc_ppm(sensore.getGM502B(), sen55_temp, sen55_hum);
 
     Serial.println("------------------------------");
     Serial.print("NO2 in PPM: ");
     Serial.println(no2);
 
-    no2 = no2 * 2.51;
+    no2 = no2 * 1.881809;
 
     Serial.println("------------------------------");
     Serial.print("NO2 in UG/M3: ");
@@ -2275,7 +2294,7 @@ void read_multigas()
     Serial.print("CO in PPM: ");
     Serial.println(co);
 
-    co = 0.0409 * co * 28 / 17.54;
+    co = co * 0.0649806579693704;
 
     Serial.println("------------------------------");
     Serial.print("CO in MG/M3: ");
@@ -3199,7 +3218,7 @@ bool read_sen55()
 
     error = sen5x.readMeasuredValues(
         pmAe1_0, pmAe2_5, massConcentrationPm4p0,
-        pmAe10_0, sen55_hum, sen55_temp, voc,
+        pmAe10_0, sen55_hum, sen55_temp, voc_index,
         no2_index);
 
     // Genera un numero float casuale tra 0.0 e 5.0
@@ -3248,13 +3267,13 @@ bool read_sen55()
             Serial.println(sen55_temp);
         }
         Serial.print("| VOC Index:             ");
-        if (isnan(voc))
+        if (isnan(voc_index))
         {
             Serial.println("n/a");
         }
         else
         {
-            Serial.println(voc);
+            Serial.println(voc_index);
         }
         Serial.print("| NOx Index:             ");
         if (isnan(no2_index))
