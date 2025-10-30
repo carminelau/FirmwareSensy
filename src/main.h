@@ -9,6 +9,7 @@
 #include <time.h>
 #include <TimeLib.h>
 
+
 // Librerie sensori
 #include "SHT21.h"
 #include <Multichannel_Gas_GMXXX.h>
@@ -31,6 +32,9 @@
 #include <MQTT.h>
 #include <ArduinoHttpClient.h>
 #include "HTTPClient.h"
+#include "esp_wifi.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 
 // Web Server
 #include <AsyncTCP.h>
@@ -327,6 +331,51 @@ const float gm702b_u2gas[2][9] PROGMEM = {
     {0.0, 5.0, 10.0, 20.0, 50.0, 100.0, 160.0, 500.0, 1000.0} // CO [ppm]
 };
 
+// ===== CONFIGURAZIONE =====
+extern const int HOP_INTERVAL_MS;      // ms per canale
+extern const int CHANNEL_MIN;
+extern const int CHANNEL_MAX;
+extern const unsigned long PRINT_INTERVAL_MS;
+
+// Soglie per sessioni / filtri
+extern const uint32_t INACTIVITY_TIMEOUT_MS;
+extern const uint32_t ACTIVE_WINDOW_MS;
+extern const uint32_t FIXED_THRESHOLD_MS;
+extern const uint32_t DEVICE_FORGET_MS;
+
+// Limiti tabella
+#define MAX_DEVICES 512
+
+// ===== Strutture =====
+struct DeviceInfo {
+  uint8_t mac[6];
+  int lastRssi;
+  uint32_t lastSeen;       // millis
+  uint32_t firstSeen;      // millis (quando è stato creato il record)
+  uint32_t count;          // numero di pacchetti visti
+  int firstChannel;
+
+  // Campi per sessione / accumulo tempo
+  uint32_t sessionStart;   // millis, 0 se non in sessione
+  uint32_t cumulativeSeenMs; // ms totali accumulati da sessioni chiuse
+};
+
+typedef struct {
+  uint8_t mac[6];
+  int8_t rssi;
+  uint8_t channel;
+  uint8_t frame_type;
+  uint8_t frame_subtype;
+  uint32_t ts;
+} SniffMsg;
+
+// Stato globale (definiti in main.cpp)
+extern DeviceInfo devices[MAX_DEVICES];
+extern int devicesCount;
+extern portMUX_TYPE devicesMux;
+extern QueueHandle_t pktQueue;
+extern volatile uint32_t droppedPackets;
+
 // Funzioni generiche
 int dir_wind_fix(int dire);
 float round_float(float value);
@@ -468,3 +517,42 @@ void parse_response(const String &payload);
 void process_token(const String &token);
 String vector_to_encoded_json_array(const std::vector<String> &vec);
 String get_list_wifi();
+
+// ===== Funzioni esportate =====
+// inizializzazione WiFi in promiscuous mode / filtro
+void setupWiFiPromiscuous();
+
+// callback ISR (promiscuous)
+void IRAM_ATTR wifi_sniffer_packet(void* buf, wifi_promiscuous_pkt_type_t type);
+
+// gestione tabella device
+int findDeviceIndex(const uint8_t *mac);
+void updateDeviceFromMsg(const SniffMsg &m);
+void closeSessionIfNeeded(DeviceInfo &d);
+
+// task FreeRTOS
+void sniffProcessorTask(void *pvParameter);
+void channelHopTask(void *pvParameter);
+void printerTask(void *pvParameter);
+
+// helper
+String macToString(const uint8_t *mac);
+
+// === Nuove API per integrazione con MQTT / controllo sniffer ===
+// controlli sniffer
+void startSnifferSingleChannel(); // abilita promiscuous sul canale corrente (non fa hopping)
+void stopSniffer();               // disabilita promiscuous e callback
+
+// channel hop control
+void startChannelHopTask();       // avvia il task che fa hop sui canali
+void stopChannelHopTask();        // ferma il task di hopping in modo sicuro
+
+// time-sliced sweep che disconnette MQTT (se callback registrata), esegue sweep per sweepMs e poi ripristina WiFi
+void doFullSweepAndReconnect(unsigned long sweepMs);
+
+// WiFi / MQTT callbacks e credenziali
+typedef void (*mqtt_disconnect_cb_t)();
+typedef void (*mqtt_reconnect_cb_t)();
+void setMqttCallbacks(mqtt_disconnect_cb_t disconnectCb, mqtt_reconnect_cb_t reconnectCb);
+void setWiFiCredentials(const char* ssid, const char* pass);
+
