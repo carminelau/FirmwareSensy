@@ -138,7 +138,7 @@ const char *verionBoard = STR(YEAR) "V" STR(VERSION);
 /**********************************
  *     VARIABILI DI STATO         *
  **********************************/
-bool sps, ozone, pmsa003, gas, sht, ane, low, lux, soil;
+bool sps, ozone, pmsa003, gas, sht, ane, low, lux, soil, sniffer;
 bool sen55, scd30, scd41, mics4514;
 bool accesspoint, relay1, relay2;
 
@@ -167,6 +167,24 @@ AsyncWebServer server(80);
 TaskHandle_t Task1;
 TaskHandle_t Task2;
 BH1750 lightMeter;
+// Semaphore signaled when WiFi is connected via AP/web config or auto-connect
+extern SemaphoreHandle_t wifiConnectedSem;
+// Debug flag: if true, xSemaphoreGive for wifiConnectedSem will be skipped (useful for isolation)
+extern bool debugDisableWifiSem;
+// Queue for delegating wifi-connected events from ISRs/handlers to notifier task
+extern QueueHandle_t wifiEventQueue;
+// Task handle for notifier task
+extern TaskHandle_t wifiNotifierTaskHandle;
+// Task handle for sniffer manager (loop_0_core)
+extern TaskHandle_t cycleTaskHandle;
+// Task handle for persistent monitor task
+extern TaskHandle_t monitorTaskHandle;
+// pending reboot to apply sniffer EEPROM change
+extern bool pendingSnifferReboot;
+
+// Runtime control helpers
+void start_sniffer_manager();
+void stop_sniffer_manager();
 
 DFRobot_MICS_I2C mics(&Wire, MICS_I2C_ADDRESS);
 DFRobot_OzoneSensor Ozone;
@@ -268,6 +286,7 @@ char psswdAPssid[10];
 String eeprom_ssid = "";
 String eeprom_psswd = "";
 bool arrivedlow = false;
+bool arrivedsniffer = false;
 
 /**********************************
  *        SERVER/MQTT             *
@@ -375,6 +394,45 @@ extern int devicesCount;
 extern portMUX_TYPE devicesMux;
 extern QueueHandle_t pktQueue;
 extern volatile uint32_t droppedPackets;
+// ===== CONFIGURAZIONE =====
+const int HOP_INTERVAL_MS = 200;
+const int CHANNEL_MIN = 1;
+const int CHANNEL_MAX = 13;
+const unsigned long PRINT_INTERVAL_MS = 30000;
+
+const uint32_t INACTIVITY_TIMEOUT_MS = 60 * 1000UL;
+const uint32_t ACTIVE_WINDOW_MS = 120 * 1000UL;
+const uint32_t FIXED_THRESHOLD_MS = 10 * 60 * 1000UL;
+const uint32_t DEVICE_FORGET_MS = 24UL * 60 * 60 * 1000UL;
+
+DeviceInfo devices[MAX_DEVICES];
+int devicesCount = 0;
+portMUX_TYPE devicesMux = portMUX_INITIALIZER_UNLOCKED;
+
+static QueueHandle_t _pktQueue = NULL;
+QueueHandle_t pktQueue = NULL;
+volatile uint32_t droppedPackets = 0;
+
+// channel hop control
+static TaskHandle_t channelHopHandle = NULL;
+static volatile bool channelHopShouldStop = false;
+
+typedef void (*mqtt_disconnect_cb_t)();
+typedef void (*mqtt_reconnect_cb_t)();
+
+// MQTT callbacks + saved creds per doFullSweepAndReconnect
+static mqtt_disconnect_cb_t mqttDisconnectCb = NULL;
+static mqtt_reconnect_cb_t mqttReconnectCb = NULL;
+
+const unsigned long SWEEP_DURATION_MS = 20000UL; // 20s sweep
+
+// sincronizzazione sweep -> manager
+static SemaphoreHandle_t sweepDoneSem = NULL;
+
+// flag condiviso monitorDone: il monitor imposta true quando ha finito la sua attività
+static volatile bool monitorDone = false;
+int num_devices_sniffed = 0;
+int avg_time_per_device = 0;
 
 // Funzioni generiche
 int dir_wind_fix(int dire);
@@ -384,6 +442,8 @@ float round_float(float value);
 void write_inside_eeprom(bool val, int addr);
 void read_topic_eeprom();
 void read_version_eeprom();
+bool read_sniffer_eeprom();
+void write_sniffer_eeprom(bool val);
 void write_conf_eeprom(bool b);
 bool read_conf_eeprom();
 bool read_wifi_eeprom();
@@ -506,8 +566,10 @@ void read_soil_moisture();
 bool init_relay(int relayPin);
 
 // Task paralleli
-void loop_1_core(void *pvParameters);
-void loop_0_core(void *pvParameters);
+void loop_monitoring(void *pvParameters);
+void loop_sniffer(void *pvParameters);
+void loop_0_core(void *pv);
+void loop_1_core(void *pv);
 
 // Utility
 bool find_arduino_devices();
@@ -519,40 +581,44 @@ String vector_to_encoded_json_array(const std::vector<String> &vec);
 String get_list_wifi();
 
 // ===== Funzioni esportate =====
-// inizializzazione WiFi in promiscuous mode / filtro
-void setupWiFiPromiscuous();
 
-// callback ISR (promiscuous)
+// Implementazione fornita in sniffer.cpp. Puoi registrarla con esp_wifi_set_promiscuous_rx_cb.
 void IRAM_ATTR wifi_sniffer_packet(void* buf, wifi_promiscuous_pkt_type_t type);
 
-// gestione tabella device
-int findDeviceIndex(const uint8_t *mac);
-void updateDeviceFromMsg(const SniffMsg &m);
-void closeSessionIfNeeded(DeviceInfo &d);
+// ===== API di controllo (da chiamare dal codice utente) =====
 
-// task FreeRTOS
-void sniffProcessorTask(void *pvParameter);
-void channelHopTask(void *pvParameter);
-void printerTask(void *pvParameter);
+// Inizializza internals dello sniffer (queue, task consumer, printer). Chiamare una volta in setup().
+void snifferInit();
 
-// helper
-String macToString(const uint8_t *mac);
+// Avvia lo sniffer in modalità "single-channel" (promiscuous sul canale corrente).
+// Utile se vuoi mantenere la STA connessa e sniffare solo il canale corrente.
+// Non avvia il channel hopper.
+void startSnifferSingleChannel();
 
-// === Nuove API per integrazione con MQTT / controllo sniffer ===
-// controlli sniffer
-void startSnifferSingleChannel(); // abilita promiscuous sul canale corrente (non fa hopping)
-void stopSniffer();               // disabilita promiscuous e callback
+// Ferma lo sniffer (disabilita promiscuous e callback).
+void stopSniffer();
 
-// channel hop control
-void startChannelHopTask();       // avvia il task che fa hop sui canali
-void stopChannelHopTask();        // ferma il task di hopping in modo sicuro
+// Avvia il task che esegue channel hopping (cambia canale periodicamente).
+// startSnifferSingleChannel() deve essere chiamato prima per abilitare il ricevitore.
+void startChannelHopTask();
 
-// time-sliced sweep che disconnette MQTT (se callback registrata), esegue sweep per sweepMs e poi ripristina WiFi
+// Ferma il task di channel hopping in modo sicuro.
+void stopChannelHopTask();
+
+// doFullSweepAndReconnect: esegue uno sweep "full" time-sliced.
+// - Disconnette temporaneamente la STA (invocando la callback mqttDisconnect se registrata).
+// - Attiva promiscuous + channel hop per sweepMs.
+// - Ferma lo sniffer e ripristina la STA usando le credenziali salvate.
+// - Alla fine invoca mqttReconnect callback se registrata.
+//
+// ATTENZIONE: Questa funzione effettua operazioni di WiFi (stop/init) e può bloccare:
+// chiamala da un task separato se non vuoi bloccare il loop principale.
 void doFullSweepAndReconnect(unsigned long sweepMs);
 
-// WiFi / MQTT callbacks e credenziali
-typedef void (*mqtt_disconnect_cb_t)();
-typedef void (*mqtt_reconnect_cb_t)();
-void setMqttCallbacks(mqtt_disconnect_cb_t disconnectCb, mqtt_reconnect_cb_t reconnectCb);
-void setWiFiCredentials(const char* ssid, const char* pass);
+// ===== Helper utili =====
+// Converte MAC in stringa (alloca su stack interno, ritorna String).
+String macToString(const uint8_t *mac);
+
+// Trova indice device (thread-safe se chiami con devicesMux o usi findDeviceIndexLocked in impl).
+int findDeviceIndex(const uint8_t *mac);
 

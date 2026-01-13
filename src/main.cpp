@@ -1,5 +1,46 @@
 #include "main.h"
 
+// semaphore for signalling when WiFi becomes connected (AP config or auto-connect)
+SemaphoreHandle_t wifiConnectedSem = NULL;
+// Debug flag: when true, the code will not call xSemaphoreGive on wifiConnectedSem
+// Set to true to isolate crashes caused by the semaphore give (default: true while debugging)
+bool debugDisableWifiSem = true;
+// Queue and notifier task for delegating wifi-connected notifications
+QueueHandle_t wifiEventQueue = NULL;
+TaskHandle_t wifiNotifierTaskHandle = NULL;
+
+// notifier task: receives events from web handler / connect routine and gives wifiConnectedSem
+static void wifi_notifier_task(void *pv)
+{
+    (void)pv;
+    uint8_t ev;
+    Serial.println("[NOTIFIER] wifi_notifier_task started");
+    for (;;)
+    {
+        if (xQueueReceive(wifiEventQueue, &ev, portMAX_DELAY) == pdTRUE)
+        {
+            // diagnostics: print available heap and stack high-water mark for this task
+            size_t freeHeap = 0;
+#ifdef ESP32
+            freeHeap = ESP.getFreeHeap();
+#endif
+            UBaseType_t stk = uxTaskGetStackHighWaterMark(NULL);
+            Serial.printf("[NOTIFIER] event received, ev=%d -> freeHeap=%u, stackHighWater=%u\n", ev, (unsigned)freeHeap, (unsigned)stk);
+
+            if (!debugDisableWifiSem && wifiConnectedSem != NULL)
+            {
+                Serial.println("[NOTIFIER] giving wifiConnectedSem");
+                xSemaphoreGive(wifiConnectedSem);
+                Serial.println("[NOTIFIER] wifiConnectedSem given");
+            }
+            else
+            {
+                Serial.println("[NOTIFIER] give skipped (debugDisableWifiSem=true or sem NULL)");
+            }
+        }
+    }
+}
+
 void setup()
 {
 
@@ -37,9 +78,9 @@ void setup()
     // delete_info_sensy();
     // delete_wifi_settings();
 
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
     get_mac_address();
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
     read_topic_eeprom();
     read_version_eeprom();
 
@@ -51,11 +92,12 @@ void setup()
 
     strcat(ssidAP, psswdAP);
 
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     conf = read_conf_eeprom();
     wifi = read_wifi_eeprom();
     low = read_low_eeprom();
+    sniffer = read_sniffer_eeprom();
 
     if (!conf)
     {
@@ -83,11 +125,11 @@ void setup()
     init_wifi();
     init_i2c();
     init_mqtt();
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
     GPSsensor = init_gps();
 
     init_spiffs();
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     topicListen = topic + "GESTORE";
     configTime(0, 0, ntpServer, ntpServer2);
@@ -141,6 +183,8 @@ void setup()
     Serial.println(wifi);
     Serial.print("| LOW:           ");
     Serial.println(low);
+    Serial.print("| SNIFFER:      ");
+    Serial.println(sniffer);
     Serial.print("| MAC:           ");
     Serial.println(myConcatenation);
     Serial.print("| EEPROM Ver.:   ");
@@ -158,217 +202,282 @@ void setup()
     Serial.println(psswdAP);
     Serial.println("-------------------------------------");
 
-    xTaskCreatePinnedToCore(
-        loop_0_core, /* Task function. */
-        "Task1",     /* name of task. */
-        10000,       /* Stack size of task */
-        NULL,        /* parameter of the task */
-        2,           /* priority of the task */
-        &Task1,      /* Task handle to keep track of created task */
-        0);          /* pin task to core 0 */
-    delay(500);
+    snifferInit();
+
+    // crea semaforo binario usato per sincronizzare sweep completion
+    sweepDoneSem = xSemaphoreCreateBinary();
+    // semaphore used to notify waiting tasks that WiFi is connected (created once)
+    wifiConnectedSem = xSemaphoreCreateBinary();
+    // create queue and notifier task for wifi events
+    wifiEventQueue = xQueueCreate(4, sizeof(uint8_t));
+    if (wifiEventQueue != NULL)
+    {
+        // give the notifier more stack to avoid overflow during diagnostics
+        xTaskCreatePinnedToCore(wifi_notifier_task, "wifi_notifier", 4096, NULL, 3, &wifiNotifierTaskHandle, 1);
+    }
+
+
+    // Do not automatically start sniffer manager here. Start monitoring by default.
+    xTaskCreatePinnedToCore(loop_monitoring, "monitor", 8192, NULL, 2, &monitorTaskHandle, 1);
+
+    // If EEPROM indicates sniffer should be enabled, and device is configured, start it now.
+    // This ensures the sniffer is only activated automatically when explicitly requested
+    // by the persisted configuration.
+    bool eepromSniffer = read_sniffer_eeprom();
+    bool eepromConf = read_conf_eeprom();
+    Serial.printf("[BOOT] EEPROM sniffer=%d conf=%d\n", eepromSniffer ? 1 : 0, eepromConf ? 1 : 0);
+    if (eepromSniffer && eepromConf)
+    {
+        Serial.println("[BOOT] EEPROM requests sniffer ON -> starting sniffer manager");
+        start_sniffer_manager();
+    }
 }
 
 void loop()
 {
 }
 
-void loop_0_core(void *pvParameters)
+void loop_0_core(void *pv)
 {
+    (void)pv;
     for (;;)
     {
-        Serial.print(F("Task1 started on core "));
-        Serial.println(xPortGetCoreID());
+        Serial.println("[CYCLE] Launching sweep task...");
+        // resetta il flag prima di partire
+        monitorDone = false;
 
-        saveCounterSD = get_count_data_saved(SD);
-        saveCounterSPIFFS = get_count_data_saved(SPIFFS);
+        // lancia sweepTask (si darà sweepDoneSem al termine)
+        xTaskCreatePinnedToCore(loop_sniffer, "sweep", 4096, NULL, 1, NULL, 1);
 
-        if ((saveCounterSD > 20 || saveCounterSPIFFS > 20) && conf)
+        // aspetta che lo sweep finisca
+        if (xSemaphoreTake(sweepDoneSem, pdMS_TO_TICKS(SWEEP_DURATION_MS + 5000)) == pdTRUE)
         {
-            connect_wifi_network(); // dovrebbe iniziare la connessione
-
-            int status_wifi = WiFi.status();
-            Serial.println();
-            Serial.println("WiFi Status: " + String(status_wifi));
-
-            if (status_wifi != WL_CONNECTED)
-            {
-                create_access_point();
-                accesspoint = true;
-#if LED_TYPE == 2
-                Serial.println("LED RGB AQUA AP ON AFTER 20 FILES");
-                neopixelWrite(LEDRGB_PIN, 0, 255, 255); // Aqua
-#endif
-#if LED_TYPE == 1
-                Serial.println("LED GRB AQUA AP ON AFTER 20 FILES");
-                neopixelWrite(LEDRGB_PIN, 255, 0, 255); // Aqua
-#endif
-            }
-            else
-            {
-                accesspoint = false;
-#if LED_TYPE == 2
-                Serial.println("LED RGB GREEN");
-                neopixelWrite(LEDRGB_PIN, 0, 255, 0); // Green
-#endif
-#if LED_TYPE == 1
-                Serial.println("LED GRB GREEN");
-                neopixelWrite(LEDRGB_PIN, 255, 0, 0); // Green
-#endif
-            }
-        }
-
-        if (connected)
-        {
-            wifi = true;
-            write_inside_eeprom(wifi, 97);
-            delay(500);
-            if (wifi && !accesspoint)
-            {
-                delay(2000);
-                Serial.println("Row 217: Disconnecting WiFi...");
-                Serial.println("WiFi: " + String(wifi));
-                Serial.println("Access Point: " + String(accesspoint));
-                disconnect_access_point();
-            }
+            Serial.println("[CYCLE] Sweep confirmed finished.");
         }
         else
         {
-            delay(30000);
+            Serial.println("[CYCLE] Sweep wait timeout; proceeding anyway.");
         }
 
-        if (!conf)
+        // Avvia il monitorTask che farà il lavoro e imposterà monitorDone=true quando finito
+        Serial.println("[CYCLE] Launching monitor task...");
+        xTaskCreatePinnedToCore(loop_monitoring, "monitor", 8192, NULL, 2, NULL, 1);
+
+        // Attendi che monitorDone diventi true (polling leggero)
+        while (!monitorDone)
         {
-            if (wifi)
-                check_reply_ID();
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        resetCount++;
+        Serial.println("[CYCLE] Monitor finished. Next cycle will start shortly.");
+        // piccolo delay prima di ripetere; puoi regolare o rimuovere
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        if (resetCount == 5)
+        {
+            ESP.restart();
+        }
+    }
+}
+
+void loop_monitoring(void *pvParameters)
+{
+    saveCounterSD = get_count_data_saved(SD);
+    saveCounterSPIFFS = get_count_data_saved(SPIFFS);
+
+    if ((saveCounterSD > 20 || saveCounterSPIFFS > 20) && conf)
+    {
+        connect_wifi_network(); // dovrebbe iniziare la connessione
+
+        int status_wifi = WiFi.status();
+        Serial.println();
+        Serial.println("WiFi Status: " + String(status_wifi));
+
+        if (status_wifi != WL_CONNECTED)
+        {
+            create_access_point();
+            accesspoint = true;
+#if LED_TYPE == 2
+            Serial.println("LED RGB AQUA AP ON AFTER 20 FILES");
+            neopixelWrite(LEDRGB_PIN, 0, 255, 255); // Aqua
+#endif
+#if LED_TYPE == 1
+            Serial.println("LED GRB AQUA AP ON AFTER 20 FILES");
+            neopixelWrite(LEDRGB_PIN, 255, 0, 255); // Aqua
+#endif
         }
         else
         {
-            if (wifi && !accesspoint)
+            accesspoint = false;
+#if LED_TYPE == 2
+            Serial.println("LED RGB GREEN");
+            neopixelWrite(LEDRGB_PIN, 0, 255, 0); // Green
+#endif
+#if LED_TYPE == 1
+            Serial.println("LED GRB GREEN");
+            neopixelWrite(LEDRGB_PIN, 255, 0, 0); // Green
+#endif
+        }
+    }
+
+    if (connected)
+    {
+        wifi = true;
+        write_inside_eeprom(wifi, 97);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        if (wifi && !accesspoint)
+        {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            Serial.println("Row 217: Disconnecting WiFi...");
+            Serial.println("WiFi: " + String(wifi));
+            Serial.println("Access Point: " + String(accesspoint));
+            disconnect_access_point();
+        }
+    }
+    else
+    {
+        // wait for WiFi configuration to complete. Use a semaphore to avoid long blocking
+        // and to safely wake when the webserver handler or auto-connect finishes.
+        while (!connected && !accesspoint && (WiFi.status() != WL_CONNECTED))
+        {
+            if (wifiConnectedSem != NULL)
             {
-                delay(5000);
-                Serial.println("Row 238: Disconnecting WiFi...");
-                Serial.println("WiFi: " + String(wifi));
-                Serial.println("Access Point: " + String(accesspoint));
-                disconnect_access_point();
-            }
-
-            if (!accesspoint)
-            {
-                WiFi.mode(WIFI_STA);
-
-                if (WiFi.status() != WL_CONNECTED)
-                {
-                    connect_wifi_network();
-                }
-            }
-
-            timeNow = millis();
-
-            if (resetCount == 0)
-            {
-                check_sensors_diagnostics();
-                delay(500);
-                send_sensors_diagnostics();
-                delay(500);
-                init_rtc();
-            }
-            if (resetCount == 15 || resetCount == 30)
-            {
-                init_rtc();
-            }
-
-            if (resetCount == 5 || resetCount == 10 || resetCount == 15 || resetCount == 20 || resetCount == 25 || resetCount == 30)
-            {
-                if (!low)
-                {
-                    if (wifi)
-                    {
-                        check_update_OTA();
-                    }
-                }
-                if (sd)
-                {
-                    String binFilePath = "";
-                    File updateBin = find_first_bin_file(SD, "/", binFilePath);
-
-                    if (updateBin)
-                    {
-                        // check if the name of the file is the same as nameBinESP
-                        if (!(String(binFilePath).indexOf(nameBinESP) != -1))
-                        {
-                            Serial.println("Update from SD card with different name");
-                            updateFromFile(updateBin, binFilePath.c_str());
-                        }
-                        else
-                        {
-                            Serial.println("Update from SD card with same name");
-                            updateFromFile(updateBin, binFilePath.c_str());
-                        }
-                    }
-                    else
-                    {
-                        Serial.println("Nessun file .bin trovato, nessun aggiornamento eseguito.");
-                    }
-                }
-            }
-
-            if (pmsa003)
-            {
-                delay(4500);
-            }
-
-            if (ozone)
-            {
-                O3 = read_ozone();
-                delay(250);
-            }
-
-            if (scd30)
-            {
-                read_scd30();
-                delay(250);
-            }
-
-            if (scd41)
-            {
-                read_scd4x();
-                delay(250);
-            }
-
-            if (gas)
-            {
-                read_multigas();
-                delay(250);
-            }
-            if (sps)
-            {
-                sps30_start_measurement();
-                delay(500);
-                if (!read_sps30(&pmAe1_0, &pmAe2_5, &pmAe10_0))
-                { // se non funziona l'sps
-
-                    if (sen55)
-                    {
-                        if (!read_sen55())
-                        { // se non funziona il sensore di polveri SEN55
-                            if (pmsa003)
-                            {
-                                read_pmsA003(); // campiono dal pms
-                            }
-                        }
-                    }
-                    else
-                    {
-                        if (pmsa003)
-                        {
-                            read_pmsA003(); // campiono dal pms
-                        }
-                    }
-                }
+                // wait up to 10s and then re-evaluate conditions (avoids single huge vTaskDelay)
+                // Diagnostic: print heap and stack high-water before and after take to help
+                // isolate IllegalInstruction that occurs shortly after semaphore give.
+                Serial.print("[DBG] Before xSemaphoreTake - freeHeap=");
+                Serial.print(ESP.getFreeHeap());
+                Serial.print(" stackHigh=");
+                Serial.println(uxTaskGetStackHighWaterMark(NULL));
+                BaseType_t _took = xSemaphoreTake(wifiConnectedSem, pdMS_TO_TICKS(10000));
+                Serial.print("[DBG] xSemaphoreTake returned=");
+                Serial.print((int)_took);
+                Serial.print(" freeHeap=");
+                Serial.print(ESP.getFreeHeap());
+                Serial.print(" stackHigh=");
+                Serial.println(uxTaskGetStackHighWaterMark(NULL));
             }
             else
             {
+                // fallback if semaphore not available
+                TickType_t ticks = pdMS_TO_TICKS(100);
+                if (ticks == 0)
+                    ticks = 1; // defensive fallback
+                vTaskDelay(ticks);
+            }
+        }
+    }
+
+    if (!conf)
+    {
+        if (wifi)
+            check_reply_ID();
+    }
+    else
+    {
+        if (wifi && !accesspoint)
+        {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            Serial.println("Row 238: Disconnecting WiFi...");
+            Serial.println("WiFi: " + String(wifi));
+            Serial.println("Access Point: " + String(accesspoint));
+            disconnect_access_point();
+        }
+
+        if (!accesspoint)
+        {
+            WiFi.mode(WIFI_STA);
+
+            if (WiFi.status() != WL_CONNECTED)
+            {
+                connect_wifi_network();
+            }
+        }
+
+        timeNow = millis();
+
+        if (resetCount == 0)
+        {
+            check_sensors_diagnostics();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            send_sensors_diagnostics();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            init_rtc();
+        }
+        if (resetCount == 15 || resetCount == 30)
+        {
+            init_rtc();
+        }
+
+        if (resetCount == 5 || resetCount == 10 || resetCount == 15 || resetCount == 20 || resetCount == 25 || resetCount == 30)
+        {
+            if (!low)
+            {
+                if (wifi)
+                {
+                    check_update_OTA();
+                }
+            }
+            if (sd)
+            {
+                String binFilePath = "";
+                File updateBin = find_first_bin_file(SD, "/", binFilePath);
+
+                if (updateBin)
+                {
+                    // check if the name of the file is the same as nameBinESP
+                    if (!(String(binFilePath).indexOf(nameBinESP) != -1))
+                    {
+                        Serial.println("Update from SD card with different name");
+                        updateFromFile(updateBin, binFilePath.c_str());
+                    }
+                    else
+                    {
+                        Serial.println("Update from SD card with same name");
+                        updateFromFile(updateBin, binFilePath.c_str());
+                    }
+                }
+                else
+                {
+                    Serial.println("Nessun file .bin trovato, nessun aggiornamento eseguito.");
+                }
+            }
+        }
+
+        if (pmsa003)
+        {
+            vTaskDelay(pdMS_TO_TICKS(4500));
+        }
+
+        if (ozone)
+        {
+            O3 = read_ozone();
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+
+        if (scd30)
+        {
+            read_scd30();
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+
+        if (scd41)
+        {
+            read_scd4x();
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+
+        if (gas)
+        {
+            read_multigas();
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+        if (sps)
+        {
+            sps30_start_measurement();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            if (!read_sps30(&pmAe1_0, &pmAe2_5, &pmAe10_0))
+            { // se non funziona l'sps
+
                 if (sen55)
                 {
                     if (!read_sen55())
@@ -387,319 +496,376 @@ void loop_0_core(void *pvParameters)
                     }
                 }
             }
-
-            if (mics4514)
-            {
-                co = read_mics(CO, "CO");
-                no2 = read_mics(NO2, "NO2");
-                nh3 = read_mics(NH3, "NH3");
-            }
-
-            if (sps)
-            {
-                print_sps30_values(pmAe1_0, pmAe2_5, pmAe10_0);
-            }
-            if (ane)
-            {
-                read_anemometer();
-            }
-            if (soil)
-            {
-                read_soil_moisture();
-            }
-
-            epochs = get_epoch();
-            if (epochs == 0)
-            {
-                epochs = get_epoch_ntp_server();
-                Serial.println("Epochs NTP: " + String(epochs));
-
-                if (epochs == 0)
-                {
-                    epochs = get_epoch_storage();
-                    Serial.println("Epochs File: " + String(epochs));
-                }
-            }
-
-            doc["ID"] = topic; // aggiungo i campi
-            doc["stato_GPS"] = GPSsensor;
-            doc["timestamp"] = epochs;
-
-            if (GPSsensor && latitude != 0 && longitude != 0)
-            {
-                doc["lat"] = latitude;
-                doc["lon"] = longitude;
-                doc["siv"] = SIV;
-            }
-
-            if (lux)
-            {
-                float lux = lightMeter.readLightLevel();
-                if (lux > 0)
-                {
-                    doc["luminosita"] = lux;
-                }
-            }
-
-            if (mics4514)
-            {
-                if (no2 > 0 && no2 < 1000)
-                {
-                    doc["no2"] = no2;
-                }
-                if (nh3 > 0 && nh3 < 1000)
-                {
-                    doc["nh3"] = nh3;
-                }
-                if (co > 0 && co < 2000)
-                {
-                    doc["co"] = co;
-                }
-            }
-            if (sps || pmsa003 || sen55)
-            {
-                if (pmAe2_5 > 0)
-                {
-                    doc["pm2_5"] = round_float(pmAe2_5);
-                }
-                if (pmAe10_0 > 0)
-                {
-                    doc["pm10"] = round_float(pmAe10_0);
-                }
-                if (pmAe1_0 > 0)
-                {
-                    doc["pm1"] = round_float(pmAe1_0);
-                }
-            }
-            if (sht)
-            {
-                float temp = sht21.getTemperature();
-                float hum = sht21.getHumidity();
-                if (temp > -20 && temp < 100)
-                {
-                    doc["temperatura"] = temp;
-                }
-                if (hum > 10 && hum < 101)
-                {
-                    doc["umidita"] = hum;
-                }
-            }
-
-            if (scd30)
-            {
-                if (scd30_temp > -20 && scd30_temp < 100)
-                {
-                    doc["temperatura"] = scd30_temp;
-                }
-                if (scd30_hum > 10 && scd30_hum < 101)
-                {
-                    doc["umidita"] = scd30_hum;
-                }
-                if (scd30_co2 > 0 && scd30_co2 < 10000)
-                {
-                    doc["co2"] = scd30_co2;
-                }
-            }
-
-            if (scd41)
-            {
-                if (scd41_temp > -20 && scd41_temp < 100)
-                {
-                    doc["temperatura"] = scd41_temp;
-                }
-                if (scd41_hum > 10 && scd41_hum < 101)
-                {
-                    doc["umidita"] = scd41_hum;
-                }
-                if (scd41_co2 > 0 && scd41_co2 < 10000)
-                {
-                    doc["co2"] = scd41_co2;
-                }
-            }
-
-            if (gas)
-            {
-                if (no2 > 0 && no2 < 1000)
-                {
-                    doc["no2"] = no2;
-                }
-                if (voc > 0 && voc < 1000)
-                {
-                    doc["voc"] = voc;
-                }
-                if (co > 0 && co < 2000)
-                {
-                    doc["co"] = co;
-                }
-                if (c2h5oh > 0 && c2h5oh < 1000)
-                {
-                    doc["c2h5oh"] = c2h5oh;
-                }
-            }
-
+        }
+        else
+        {
             if (sen55)
             {
-                if (sen55_temp > -20 && sen55_temp < 100)
-                {
-                    doc["temperatura"] = sen55_temp;
-                }
-                if (sen55_hum > 10 && sen55_hum < 101)
-                {
-                    doc["umidita"] = sen55_hum;
-                }
-                if (voc_index > 0 && voc_index < 1000)
-                {
-                    doc["voc_index"] = voc_index;
-                }
-                if (no2_index > 0 && no2_index < 1000)
-                {
-                    doc["nox_index"] = no2_index;
-                }
-            }
-
-            if (ane)
-            {
-                if (temperature_ane > -20 && temperature_ane < 100)
-                {
-                    doc["temperatura"] = temperature_ane;
-                }
-                if (humidity_ane > 0 && humidity_ane < 101)
-                {
-                    doc["umidita"] = humidity_ane;
-                }
-                if (pressure_ane > 800 && pressure_ane < 1200) 
-                {
-                    doc["pressione"] = pressure_ane;
-                }
-
-                doc["direzione_vento"] = dir_wind_fix(windDirection_ane);
-                doc["intensita_vento"] = windSpeed_ane;
-            }
-            if (ozone)
-            {
-                if (O3 > 0 && O3 < 10000)
-                {
-                    doc["o3"] = O3;
-                }
-            }
-            if (soil)
-            {
-                if (soil_ph > 0 && soil_ph < 14)
-                {
-                    doc["soil_ph"] = soil_ph;
-                }
-                if (soil_temperature > -3 && soil_temperature < 100)
-                {
-                    doc["soil_temp"] = soil_temperature;
-                }
-                if (soil_humidity > 0 && soil_humidity < 101)
-                {
-                    doc["soil_hum"] = soil_humidity;
-                }
-                if (soil_conductivity > 0 && soil_conductivity < 1000)
-                {
-                    doc["soil_cond"] = soil_conductivity;
-                }
-                if (soil_nitrogen > 0 && soil_nitrogen < 1000)
-                {
-                    doc["soil_nitrogen"] = soil_nitrogen;
-                }
-                if (soil_phosphorus > 0 && soil_phosphorus < 1000)
-                {
-                    doc["soil_phosphorus"] = soil_phosphorus;
-                }
-                if (soil_potassium > 0 && soil_potassium < 1000)
-                {
-                    doc["soil_potassium"] = soil_potassium;
-                }
-            }
-
-            // check if all value of Pollutants is in keys od doc
-            for (String pollutant : Pollutants)
-            {
-                if (!doc.containsKey(pollutant))
-                {
-                    PollutantsMissing.push_back(pollutant);
-                }
-            }
-
-            serializeJson(doc, jsonOutput); // ottengo la stringa da inviare campionata in questo ciclo
-
-            Serial.println(jsonOutput);
-
-            String pollutantMissing = vector_to_encoded_json_array(PollutantsMissing);
-            Serial.println("Pollutants Missing: " + pollutantMissing);
-            if (pollutantMissing != "[]")
-            {
-                get_nearest_data(pollutantMissing);
-                PollutantsMissing.clear();
-            }
-
-            serializeJson(doc, jsonOutput); // ottengo la stringa da inviare campionata in questo ciclo
-
-            Serial.println(jsonOutput);
-
-            if (WiFi.status() != WL_CONNECTED && !accesspoint)
-            {
-                connect_wifi_network();
-            }
-
-            if (wifi)
-            { // se c'è wifi mando col wifi
-
-                if (!send_data_mqtt())
-                { // se non va il wifi
-
-                    Serial.println(F("NO WIfI Local save mode"));
-
-                    serializeJson(doc, jsonOutput);
-                    write_file_data(jsonOutput);
-                }
-                // azzero il numero di json e svuoto il buffer contentente le stringhe json
-                doc.clear();
-                info.clear();
-                checkSensor.clear();
-                resetCount++;
-
-                if (low)
-                {
-                    setCpuFrequencyMhz(80);
-                }
-                Serial.print("LISTEN MQTT ");
-                Serial.println(millis());
-                for (int i = 0; i < 2000; i++)
-                {
-                    loop_mqtt();
-                }
-                Serial.print("FINISH LISTEN MQTT ");
-                Serial.println(millis());
-                diffe = millis() - timeNow + 35000;
-                Serial.print("Execution Time: ");
-                Serial.println(diffe);
-                set_rtc(epochs + diffe / 1000);
-                delete_message_received_mqtt();
-
-                Serial.flush();
-
-                if (resetCount == 50)
-                {
-                    ESP.restart();
-                }
-                if (low)
-                {
-                    WiFi.disconnect();
-                    if (sen55)
+                if (!read_sen55())
+                { // se non funziona il sensore di polveri SEN55
+                    if (pmsa003)
                     {
-                        sen5x.setFanAutoCleaningInterval(0); // disabilito la pulizia automatica della ventola
-                        sen5x.stopMeasurement(); // stop del sensore SEN55
+                        read_pmsA003(); // campiono dal pms
                     }
-                    setCpuFrequencyMhz(10);
-
-                    esp_deep_sleep_start();
+                }
+            }
+            else
+            {
+                if (pmsa003)
+                {
+                    read_pmsA003(); // campiono dal pms
                 }
             }
         }
+
+        if (mics4514)
+        {
+            co = read_mics(CO, "CO");
+            no2 = read_mics(NO2, "NO2");
+            nh3 = read_mics(NH3, "NH3");
+        }
+
+        if (sps)
+        {
+            print_sps30_values(pmAe1_0, pmAe2_5, pmAe10_0);
+        }
+        if (ane)
+        {
+            read_anemometer();
+        }
+        if (soil)
+        {
+            read_soil_moisture();
+        }
+
+        epochs = get_epoch();
+        if (epochs == 0)
+        {
+            epochs = get_epoch_ntp_server();
+            Serial.println("Epochs NTP: " + String(epochs));
+
+            if (epochs == 0)
+            {
+                epochs = get_epoch_storage();
+                Serial.println("Epochs File: " + String(epochs));
+            }
+        }
+
+        doc["ID"] = topic; // aggiungo i campi
+        doc["stato_GPS"] = GPSsensor;
+        doc["timestamp"] = epochs;
+
+        if (GPSsensor && latitude != 0 && longitude != 0)
+        {
+            doc["lat"] = latitude;
+            doc["lon"] = longitude;
+            doc["siv"] = SIV;
+        }
+
+        if (lux)
+        {
+            float lux = lightMeter.readLightLevel();
+            if (lux > 0)
+            {
+                doc["luminosita"] = lux;
+            }
+        }
+
+        if (mics4514)
+        {
+            if (no2 > 0 && no2 < 1000)
+            {
+                doc["no2"] = no2;
+            }
+            if (nh3 > 0 && nh3 < 1000)
+            {
+                doc["nh3"] = nh3;
+            }
+            if (co > 0 && co < 2000)
+            {
+                doc["co"] = co;
+            }
+        }
+        if (sps || pmsa003 || sen55)
+        {
+            if (pmAe2_5 > 0)
+            {
+                doc["pm2_5"] = round_float(pmAe2_5);
+            }
+            if (pmAe10_0 > 0)
+            {
+                doc["pm10"] = round_float(pmAe10_0);
+            }
+            if (pmAe1_0 > 0)
+            {
+                doc["pm1"] = round_float(pmAe1_0);
+            }
+        }
+        if (sht)
+        {
+            float temp = sht21.getTemperature();
+            float hum = sht21.getHumidity();
+            if (temp > -20 && temp < 100)
+            {
+                doc["temperatura"] = temp;
+            }
+            if (hum > 10 && hum < 101)
+            {
+                doc["umidita"] = hum;
+            }
+        }
+
+        if (scd30)
+        {
+            if (scd30_temp > -20 && scd30_temp < 100)
+            {
+                doc["temperatura"] = scd30_temp;
+            }
+            if (scd30_hum > 10 && scd30_hum < 101)
+            {
+                doc["umidita"] = scd30_hum;
+            }
+            if (scd30_co2 > 0 && scd30_co2 < 10000)
+            {
+                doc["co2"] = scd30_co2;
+            }
+        }
+
+        if (scd41)
+        {
+            if (scd41_temp > -20 && scd41_temp < 100)
+            {
+                doc["temperatura"] = scd41_temp;
+            }
+            if (scd41_hum > 10 && scd41_hum < 101)
+            {
+                doc["umidita"] = scd41_hum;
+            }
+            if (scd41_co2 > 0 && scd41_co2 < 10000)
+            {
+                doc["co2"] = scd41_co2;
+            }
+        }
+
+        if (gas)
+        {
+            if (no2 > 0 && no2 < 1000)
+            {
+                doc["no2"] = no2;
+            }
+            if (voc > 0 && voc < 1000)
+            {
+                doc["voc"] = voc;
+            }
+            if (co > 0 && co < 2000)
+            {
+                doc["co"] = co;
+            }
+            if (c2h5oh > 0 && c2h5oh < 1000)
+            {
+                doc["c2h5oh"] = c2h5oh;
+            }
+        }
+
+        if (sen55)
+        {
+            if (sen55_temp > -20 && sen55_temp < 100)
+            {
+                doc["temperatura"] = sen55_temp;
+            }
+            if (sen55_hum > 10 && sen55_hum < 101)
+            {
+                doc["umidita"] = sen55_hum;
+            }
+            if (voc_index > 0 && voc_index < 1000)
+            {
+                doc["voc_index"] = voc_index;
+            }
+            if (no2_index > 0 && no2_index < 1000)
+            {
+                doc["nox_index"] = no2_index;
+            }
+        }
+
+        if (ane)
+        {
+            if (temperature_ane > -20 && temperature_ane < 100)
+            {
+                doc["temperatura"] = temperature_ane;
+            }
+            if (humidity_ane > 0 && humidity_ane < 101)
+            {
+                doc["umidita"] = humidity_ane;
+            }
+            if (pressure_ane > 800 && pressure_ane < 1200)
+            {
+                doc["pressione"] = pressure_ane;
+            }
+
+            doc["direzione_vento"] = dir_wind_fix(windDirection_ane);
+            doc["intensita_vento"] = windSpeed_ane;
+        }
+        if (ozone)
+        {
+            if (O3 > 0 && O3 < 10000)
+            {
+                doc["o3"] = O3;
+            }
+        }
+        if (soil)
+        {
+            if (soil_ph > 0 && soil_ph < 14)
+            {
+                doc["soil_ph"] = soil_ph;
+            }
+            if (soil_temperature > -3 && soil_temperature < 100)
+            {
+                doc["soil_temp"] = soil_temperature;
+            }
+            if (soil_humidity > 0 && soil_humidity < 101)
+            {
+                doc["soil_hum"] = soil_humidity;
+            }
+            if (soil_conductivity > 0 && soil_conductivity < 1000)
+            {
+                doc["soil_cond"] = soil_conductivity;
+            }
+            if (soil_nitrogen > 0 && soil_nitrogen < 1000)
+            {
+                doc["soil_nitrogen"] = soil_nitrogen;
+            }
+            if (soil_phosphorus > 0 && soil_phosphorus < 1000)
+            {
+                doc["soil_phosphorus"] = soil_phosphorus;
+            }
+            if (soil_potassium > 0 && soil_potassium < 1000)
+            {
+                doc["soil_potassium"] = soil_potassium;
+            }
+        }
+        if (true)
+        {
+            doc["num_devices_sniffed"] = num_devices_sniffed;
+            doc["avg_time_per_device"] = avg_time_per_device;
+        }
+
+        // check if all value of Pollutants is in keys od doc
+        for (String pollutant : Pollutants)
+        {
+            if (!doc.containsKey(pollutant))
+            {
+                PollutantsMissing.push_back(pollutant);
+            }
+        }
+
+        serializeJson(doc, jsonOutput); // ottengo la stringa da inviare campionata in questo ciclo
+
+        Serial.println(jsonOutput);
+
+        String pollutantMissing = vector_to_encoded_json_array(PollutantsMissing);
+        Serial.println("Pollutants Missing: " + pollutantMissing);
+        if (pollutantMissing != "[]")
+        {
+            get_nearest_data(pollutantMissing);
+            PollutantsMissing.clear();
+        }
+
+        serializeJson(doc, jsonOutput); // ottengo la stringa da inviare campionata in questo ciclo
+
+        Serial.println(jsonOutput);
+
+        if (WiFi.status() != WL_CONNECTED && !accesspoint)
+        {
+            connect_wifi_network();
+        }
+
+        if (wifi)
+        { // se c'è wifi mando col wifi
+
+            if (!send_data_mqtt())
+            { // se non va il wifi
+
+                Serial.println(F("NO WIfI Local save mode"));
+
+                serializeJson(doc, jsonOutput);
+                write_file_data(jsonOutput);
+            }
+            // azzero il numero di json e svuoto il buffer contentente le stringhe json
+            doc.clear();
+            info.clear();
+            checkSensor.clear();
+
+            if (low)
+            {
+                setCpuFrequencyMhz(80);
+            }
+            Serial.print("LISTEN MQTT ");
+            Serial.println(millis());
+            for (int i = 0; i < 2000; i++)
+            {
+                loop_mqtt();
+            }
+            Serial.print("FINISH LISTEN MQTT ");
+            Serial.println(millis());
+            diffe = millis() - timeNow + 35000;
+            Serial.print("Execution Time: ");
+            Serial.println(diffe);
+            set_rtc(epochs + diffe / 1000);
+            delete_message_received_mqtt();
+
+            Serial.flush();
+            if (low)
+            {
+                WiFi.disconnect();
+                if (sen55)
+                {
+                    sen5x.setFanAutoCleaningInterval(0); // disabilito la pulizia automatica della ventola
+                    sen5x.stopMeasurement();             // stop del sensore SEN55
+                }
+                setCpuFrequencyMhz(10);
+
+                esp_deep_sleep_start();
+            }
+        }
+        // If a sniffer enable/disable was requested via MQTT, reboot now at end of this cycle
+        if (pendingSnifferReboot)
+        {
+            Serial.println("[MONITOR] pendingSnifferReboot=true -> restarting to apply sniffer EEPROM change");
+            vTaskDelay(pdMS_TO_TICKS(200));
+            ESP.restart();
+        }
     }
+    if (sniffer)
+    {
+        monitorDone = true; // segnale
+        Serial.println("[MONITOR] monitorDone = true set. Exiting monitorTask.");
+        vTaskDelete(NULL);
+    }
+}
+
+void loop_sniffer(void *pvParameters)
+{
+    Serial.println("[SWEEP] Starting multi-channel sweep...");
+    // Abilita promisc + hop
+    startSnifferSingleChannel();
+    vTaskDelay(pdMS_TO_TICKS(50));
+    startChannelHopTask();
+
+    // Attendi durata sweep
+    unsigned long t0 = millis();
+    while (millis() - t0 < SWEEP_DURATION_MS)
+    {
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    // Ferma hopping e promisc
+    stopChannelHopTask();
+    stopSniffer();
+
+    Serial.println("[SWEEP] Sweep finished, signaling manager...");
+    xSemaphoreGive(sweepDoneSem);
+
+    vTaskDelete(NULL);
 }
 
 void loop_1_core(void *pvParameters)
@@ -722,7 +888,7 @@ void loop_1_core(void *pvParameters)
             if (millis() > 5000 && (!myGNSS.isConnected()))
             {
                 Serial.println("No GPS detected");
-                delay(1000);
+                vTaskDelay(pdMS_TO_TICKS(1000));
             }
         }
         check_pressing_button();
@@ -987,9 +1153,9 @@ float round_float(float value)
 
 bool init_relay(int relayPin)
 {
-    pinMode(relayPin, OUTPUT);    // Inizializzo il relay
-    digitalWrite(relayPin, HIGH); // Provo ad attivarlo
-    delay(10);                    // Piccola attesa per stabilizzazione
+    pinMode(relayPin, OUTPUT);     // Inizializzo il relay
+    digitalWrite(relayPin, HIGH);  // Provo ad attivarlo
+    vTaskDelay(pdMS_TO_TICKS(10)); // Piccola attesa per stabilizzazione
 
     if (digitalRead(relayPin) != HIGH)
     {
@@ -1051,7 +1217,7 @@ void create_access_point()
       Serial.println(input_psswd);
 
       EEPROM.commit();
-      delay(500);
+      vTaskDelay(pdMS_TO_TICKS(500));
 
       if (String(input_ssid)!="") {//se password e ssid sono stati inseriti
 
@@ -1061,7 +1227,7 @@ void create_access_point()
           WiFi.begin(input_ssid, input_psswd);//accedo al wifi con le credenziali inserite da form
         }
         
-        delay(250);
+        vTaskDelay(pdMS_TO_TICKS(250));
         connected=false;
         for (int i = 0; i < 5; i++)
         {
@@ -1070,15 +1236,31 @@ void create_access_point()
           {
             break;
           }
-          delay(800);
+          vTaskDelay(pdMS_TO_TICKS(800));
         }
         Serial.println("");
-      if (WiFi.status() == WL_CONNECTED) {//se la connessione è fallita o non esiste l'ssid
-        connected=true;
-        request->send(200, "text/plain", "connected");
-      } else {
-      request->send(200, "text/plain", "error");
-        }
+            if (WiFi.status() == WL_CONNECTED) { //se la connessione è fallita o non esiste l'ssid
+                connected = true;
+                Serial.println("[WEB] configWifi: connected=true (web handler)");
+                if (wifiEventQueue != NULL)
+                {
+                    uint8_t ev = 1;
+                    BaseType_t ok = xQueueSend(wifiEventQueue, &ev, 0);
+                    if (ok == pdTRUE)
+                    {
+                        Serial.println("[WEB] posted wifi event to queue (notifier will give sem)");
+                    }
+                    else
+                    {
+                        Serial.println("[WEB] failed to post wifi event to queue");
+                    }
+                }
+                request->send(200, "text/plain", "connected");
+            }
+            else
+            {
+                request->send(200, "text/plain", "error");
+            }
       }
       else {
         request->send(200, "text/plain", "errorNOSSID");
@@ -1291,7 +1473,7 @@ bool init_pmsA003(void)
 {
     int somma = 0;
 
-    delay(10000);
+    vTaskDelay(pdMS_TO_TICKS(10000));
     pms.read();
     somma = pms.pm01 + pms.pm25 + pms.pm10;
     Serial.print("Sum of PM: ");
@@ -1304,7 +1486,7 @@ bool init_pmsA003(void)
         }
         else
         {
-            delay(10000);
+            vTaskDelay(pdMS_TO_TICKS(10000));
             pms.read();
             somma = pms.pm01 + pms.pm25 + pms.pm10;
         }
@@ -1404,7 +1586,7 @@ String read_file_storage(fs::FS &fs, const char *path)
 
 bool write_file_storage(fs::FS &fs, const char *path, const char *message)
 {
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     Serial.printf("Writing file: %s\r\n", path);
     File file = fs.open(path, FILE_WRITE);
     if (!file)
@@ -1458,7 +1640,7 @@ void check_sensors_diagnostics()
     sd = init_sd_card();
     mics4514 = init_mics();
     ane = check_anemometer();
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     soil = check_soil_moisture();
     // soil = true;
     lux = init_luxometer();
@@ -1592,15 +1774,19 @@ bool connect_wifi_network()
     Serial.println(epass);
 
     /*CONNETTO AL WIFI*/
+    Serial.println("[WIFI] connect_wifi_network: starting WiFi.begin");
+    Serial.printf("[WIFI] SSID len=%d PASS len=%d\n", esid.length(), epass.length());
     if (epass.length() > 0)
     { // wifi con password
         WiFi.begin((char *)esid.c_str(), (char *)epass.c_str());
-        delay(1500);
+        Serial.println("[WIFI] WiFi.begin called with password");
+        vTaskDelay(pdMS_TO_TICKS(1500));
     }
     else
     { // wifi senza password
         WiFi.begin((char *)esid.c_str());
-        delay(1500);
+        Serial.println("[WIFI] WiFi.begin called without password");
+        vTaskDelay(pdMS_TO_TICKS(1500));
     }
 
     for (int i = 0; i < 6; i++)
@@ -1610,7 +1796,7 @@ bool connect_wifi_network()
         {
             break;
         }
-        delay(250);
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
     Serial.println("");
 
@@ -1618,6 +1804,20 @@ bool connect_wifi_network()
     {
         wifi = true;
         write_inside_eeprom(wifi, 97);
+        // notify waiting tasks that WiFi reached connected state
+        Serial.println("[WIFI] connect_wifi_network: WL_CONNECTED");
+        if (wifiEventQueue != NULL)
+        {
+            uint8_t ev = 1;
+            if (xQueueSend(wifiEventQueue, &ev, 0) == pdTRUE)
+            {
+                Serial.println("[WIFI] posted wifi event to queue (notifier will give sem)");
+            }
+            else
+            {
+                Serial.println("[WIFI] failed to post wifi event to queue");
+            }
+        }
 
         return true;
     }
@@ -1628,7 +1828,7 @@ void write_inside_eeprom(bool val, int addr)
 {
     EEPROM.writeBool(addr, val);
     EEPROM.commit();
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
 }
 
 void delete_wifi_settings()
@@ -1642,7 +1842,7 @@ void delete_wifi_settings()
     EEPROM.writeString(32, pwd);
 
     EEPROM.commit();
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     WiFi.disconnect(); // disconnetto wifi
 
@@ -1657,7 +1857,7 @@ void IRAM_ATTR disconnect_access_point()
     Serial.println("Disconnecting AP...");
     server.end();                 // Stop the server
     WiFi.softAPdisconnect(false); // Disconnect the AP without stopping the WiFi
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 String get_id_square()
@@ -1721,7 +1921,7 @@ void write_string_eeprom(char *c, int offset)
 
     EEPROM.writeString(offset, c);
     EEPROM.commit();
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     Serial.println(c);
 }
 
@@ -1730,7 +1930,7 @@ void write_string_eeprom(String c, int offset)
 
     EEPROM.writeString(offset, c);
     EEPROM.commit();
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     Serial.println(c);
 }
 
@@ -1754,7 +1954,7 @@ void read_version_eeprom()
 void check_reply_ID()
 {
     String id = get_id_square();
-    delay(12000);
+    vTaskDelay(pdMS_TO_TICKS(12000));
     if (WiFi.status() != WL_CONNECTED)
     {
         connect_wifi_network();
@@ -1777,7 +1977,7 @@ void check_reply_ID()
             press_long_time_button();
             ESP.restart();
         }
-        delay(12000);
+        vTaskDelay(pdMS_TO_TICKS(12000));
     }
     Serial.print("ID: ");
     Serial.println(id.substring(0, 14));
@@ -1802,21 +2002,28 @@ void check_reply_ID()
     neopixelWrite(LEDRGB_PIN, 255, 0, 0);
 #endif
     write_conf_eeprom(conf);
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 void write_conf_eeprom(bool val)
 {
     EEPROM.writeBool(101, val);
     EEPROM.commit();
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 void write_low_eeprom(bool val)
 {
     EEPROM.writeBool(205, val);
     EEPROM.commit();
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+void write_sniffer_eeprom(bool val)
+{
+    EEPROM.writeBool(206, val);
+    EEPROM.commit();
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 bool read_conf_eeprom()
@@ -1834,6 +2041,11 @@ bool read_low_eeprom()
     return EEPROM.readBool(205);
 }
 
+bool read_sniffer_eeprom()
+{
+    return EEPROM.readBool(206);
+}
+
 void delete_info_sensy()
 {
     char identificativo[14] = "";
@@ -1845,7 +2057,7 @@ void delete_info_sensy()
     write_low_eeprom(false);
     write_conf_eeprom(false);
     EEPROM.commit();
-    delay(500);
+    vTaskDelay(pdMS_TO_TICKS(500));
 }
 
 void send_sensors_diagnostics()
@@ -1892,7 +2104,7 @@ void check_update_OTA()
 
     read_version_eeprom();
 
-    delay(2000);
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     String response = "";
     const String resource = "/versione_firmware?ID=" + topic;
@@ -2134,7 +2346,7 @@ void exec_update_OTA()
 int16_t read_ozone()
 {
     int16_t ozoneConcentration = Ozone.readOzoneData(COLLECT_NUMBER);
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     Serial.print("The concentration of O3 is ");
     Serial.print(ozoneConcentration - 20);
     Serial.println(" PPB.");
@@ -2254,26 +2466,27 @@ float get_co_ppm(uint32_t raw, float temp, float humidity)
     return return_ppm_gas_value(co_corr, (float *)gm702b_u2gas, 9);
 }
 
-float calibrate(float raw, float init, float dV, float ppm) {
-  return (raw - init) * (ppm / dV);
+float calibrate(float raw, float init, float dV, float ppm)
+{
+    return (raw - init) * (ppm / dV);
 }
 
 void read_multigas()
 {
     sensore.preheated();
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     sensore.unPreheated();
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     float raw_no2 = sensore.getGM102B() / 100.0;
     no2 = calibrate(raw_no2, GM102B_init, GM102B_dV, GM102B_ppm);
-    
+
     float raw_co = sensore.getGM702B() / 100.0;
     co = calibrate(raw_co, GM702B_init, GM702B_dV, GM702B_ppm);
 
     float raw_voc = sensore.getGM502B() / 100.0;
     voc = calibrate(raw_voc, GM502B_init, GM502B_dV, GM502B_ppm);
-    
+
     // no2 = get_no2_ppm(sensore.getGM102B(), sen55_temp, sen55_hum);
     // co = get_co_ppm(sensore.getGM702B(), sen55_temp, sen55_hum);
     // voc = get_voc_ppm(sensore.getGM502B(), sen55_temp, sen55_hum);
@@ -2288,7 +2501,7 @@ void read_multigas()
     Serial.print("NO2 in UG/M3: ");
     Serial.println(no2);
 
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     Serial.println("------------------------------");
     Serial.print("CO in PPM: ");
@@ -2300,7 +2513,7 @@ void read_multigas()
     Serial.print("CO in MG/M3: ");
     Serial.println(co);
 
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     Serial.println("------------------------------");
     Serial.print("VOC in PPM: ");
@@ -2327,7 +2540,7 @@ bool read_sps30(float *pm1, float *pm2, float *pm10)
         {
             break; // Esce dal loop se i dati sono pronti
         }
-        delay(100); // Attendi 100 ms prima di riprovare
+        vTaskDelay(pdMS_TO_TICKS(100)); // Attendi 100 ms prima di riprovare
     }
 
     ret = sps30_read_measurement(&sps30_data);
@@ -2460,7 +2673,7 @@ void write_file_data(char *jsonString)
 void loop_mqtt()
 {
     clientMQTT.loop();
-    delay(10);
+    vTaskDelay(pdMS_TO_TICKS(10));
 }
 
 // funzione per connettersi al server MQTT e inviare un messaggio vuoto per evitare che l'ultimo messaggio ricevuto rimanga in coda
@@ -2478,7 +2691,7 @@ void delete_message_received_mqtt()
             if (!clientMQTT.connect(topicListen.c_str(), "servermqtt", "ssq2020d"))
             {
                 Serial.print(".");
-                delay(1000);
+                vTaskDelay(pdMS_TO_TICKS(1000));
             }
         }
         clientMQTT.publish(topicListen, "", true, 1);
@@ -2502,6 +2715,26 @@ void read_message_received_mqtt(String &topic, String &payload)
     if (payload.length() > 1)
     {
         arrived = true;
+    }
+
+    // New commands: 'snon' -> enable sniffer manager, 'snoff' -> disable sniffer manager
+    if (payload.equals("snon"))
+    {
+        Serial.println("MQTT: enable sniffer requested (snon)");
+        write_sniffer_eeprom(true);
+        // schedule reboot at end of current monitoring cycle to apply change
+        pendingSnifferReboot = true;
+        Serial.println("MQTT: sniffer enable scheduled (reboot at end of cycle)");
+        return;
+    }
+    else if (payload.equals("snoff"))
+    {
+        Serial.println("MQTT: disable sniffer requested (snoff)");
+        write_sniffer_eeprom(false);
+        // schedule reboot at end of current monitoring cycle to apply change
+        pendingSnifferReboot = true;
+        Serial.println("MQTT: sniffer disable scheduled (reboot at end of cycle)");
+        return;
     }
 
     if (payload.length() == 2) // Struttura del messaggio on || of || ca
@@ -2557,7 +2790,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 write_low_eeprom(false);
             }
 
-            delay(3000);
+            vTaskDelay(pdMS_TO_TICKS(3000));
             arrivedlow = true;
         }
     }
@@ -2600,7 +2833,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY1_PIN, HIGH); // attivo relay 18
                 if (op1time > 0)
                 {
-                    delay(op1time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op1time * 60000));
                     digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                 }
             }
@@ -2609,7 +2842,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                 if (op1time > 0)
                 {
-                    delay(op1time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op1time * 60000));
                     digitalWrite(RELAY1_PIN, HIGH); // disattivo relay 18
                 }
             }
@@ -2618,7 +2851,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY2_PIN, HIGH); // attivo relay 18
                 if (op2time > 0)
                 {
-                    delay(op2time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op2time * 60000));
                     digitalWrite(RELAY2_PIN, LOW); // disattivo relay 18
                 }
             }
@@ -2627,7 +2860,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY2_PIN, LOW); // disattivo relay 19
                 if (op2time > 0)
                 {
-                    delay(op2time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op2time * 60000));
                     digitalWrite(RELAY2_PIN, HIGH); // disattivo relay 18
                 }
             }
@@ -2703,7 +2936,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY1_PIN, HIGH); // attivo relay 18
                 if (op1time > 0)
                 {
-                    delay(op1time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op1time * 60000));
                     digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                 }
             }
@@ -2712,7 +2945,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                 if (op1time > 0)
                 {
-                    delay(op1time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op1time * 60000));
                     digitalWrite(RELAY1_PIN, HIGH); // disattivo relay 18
                 }
             }
@@ -2721,7 +2954,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY2_PIN, HIGH); // attivo relay 18
                 if (op2time > 0)
                 {
-                    delay(op2time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op2time * 60000));
                     digitalWrite(RELAY2_PIN, LOW); // disattivo relay 18
                 }
             }
@@ -2730,7 +2963,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY2_PIN, LOW); // disattivo relay 19
                 if (op2time > 0)
                 {
-                    delay(op2time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op2time * 60000));
                     digitalWrite(RELAY2_PIN, HIGH); // disattivo relay 18
                 }
             }
@@ -2752,7 +2985,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                     digitalWrite(RELAY1_PIN, HIGH); // attivo relay 18
                     if (op1time > 0)
                     {
-                        delay(int(op1time * 60000));
+                        vTaskDelay(pdMS_TO_TICKS(int(op1time * 60000)));
                         digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                     }
                 }
@@ -2761,7 +2994,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                     digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                     if (op1time > 0)
                     {
-                        delay(int(op1time * 60000));
+                        vTaskDelay(pdMS_TO_TICKS(int(op1time * 60000)));
                         digitalWrite(RELAY1_PIN, HIGH); // disattivo relay 18
                     }
                 }
@@ -2770,7 +3003,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                     digitalWrite(RELAY2_PIN, HIGH); // attivo relay 18
                     if (op2time > 0)
                     {
-                        delay(int(op2time * 60000));
+                        vTaskDelay(pdMS_TO_TICKS(int(op2time * 60000)));
                         digitalWrite(RELAY2_PIN, LOW); // disattivo relay 18
                     }
                 }
@@ -2779,7 +3012,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                     digitalWrite(RELAY2_PIN, LOW); // disattivo relay 19
                     if (op2time > 0)
                     {
-                        delay(int(op2time * 60000));
+                        vTaskDelay(pdMS_TO_TICKS(int(op2time * 60000)));
                         digitalWrite(RELAY2_PIN, HIGH); // disattivo relay 18
                     }
                 }
@@ -2800,7 +3033,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY1_PIN, HIGH); // attivo relay 18
                 if (op1time > 0)
                 {
-                    delay(op1time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op1time * 60000));
                     digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                 }
             }
@@ -2809,7 +3042,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY1_PIN, LOW); // disattivo relay 18
                 if (op1time > 0)
                 {
-                    delay(op1time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op1time * 60000));
                     digitalWrite(RELAY1_PIN, HIGH); // disattivo relay 18
                 }
             }
@@ -2818,7 +3051,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY2_PIN, HIGH); // attivo relay 18
                 if (op2time > 0)
                 {
-                    delay(op2time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op2time * 60000));
                     digitalWrite(RELAY2_PIN, LOW); // disattivo relay 18
                 }
             }
@@ -2827,7 +3060,7 @@ void read_message_received_mqtt(String &topic, String &payload)
                 digitalWrite(RELAY2_PIN, LOW); // disattivo relay 19
                 if (op2time > 0)
                 {
-                    delay(op2time * 60000);
+                    vTaskDelay(pdMS_TO_TICKS(op2time * 60000));
                     digitalWrite(RELAY2_PIN, HIGH); // disattivo relay 18
                 }
             }
@@ -2850,7 +3083,7 @@ void connect_mqtt_client()
         if (!clientMQTT.connect(topic.c_str(), "servermqtt", "ssq2020d"))
         {
             Serial.print(".");
-            delay(1000);
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
 
@@ -3076,7 +3309,7 @@ void send_data_from_storage(fs::FS &fs)
 
     while (sentCount < totalFiles)
     {
-        delay(1000);
+        vTaskDelay(pdMS_TO_TICKS(1000));
         cancellaFile = true;
         f = dir.openNextFile();
         if (!f)
@@ -3211,7 +3444,7 @@ bool read_sen55()
     uint16_t error;
     char errorMessage[256];
 
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
     // Read Measurement
     float massConcentrationPm4p0;
@@ -3298,7 +3531,7 @@ bool init_scd30()
 
     scd3x.stopPeriodicMeasurement();
     scd3x.softReset();
-    delay(2000);
+    vTaskDelay(pdMS_TO_TICKS(2000));
     uint8_t major = 0;
     uint8_t minor = 0;
 
@@ -3358,7 +3591,7 @@ bool init_scd4x()
         Serial.println("Error SCD4x");
         return false;
     }
-    delay(2000);
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     Serial.println("Address SCD41: 0x62");
 
@@ -3377,7 +3610,7 @@ bool read_scd4x()
     uint16_t error;
     char errorMessage[256];
 
-    delay(100);
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     bool isDataReady = false;
     error = scd4x.getDataReadyStatus(isDataReady);
@@ -3435,7 +3668,7 @@ bool init_mics()
     }
     {
 
-        delay(1000);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     Serial.println("Device connected successfully!");
@@ -3451,7 +3684,7 @@ bool init_mics()
     while (!mics.warmUpTime(CALIBRATION_TIME))
     {
         Serial.println("Please warm up!");
-        delay(1000);
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     return true;
@@ -3916,7 +4149,7 @@ String get_list_wifi()
 
     while (n <= 0 && retry_count < MAX_RETRIES)
     {
-        delay(SCAN_TIMEOUT_MS); // todo provare a mettere dopo scanComplete
+        vTaskDelay(pdMS_TO_TICKS(SCAN_TIMEOUT_MS)); // todo provare a mettere dopo scanComplete
         n = WiFi.scanComplete();
         retry_count++;
     }
@@ -3953,4 +4186,462 @@ String get_list_wifi()
     WiFi.scanDelete();
 
     return json;
+}
+
+static inline int findDeviceIndexLocked(const uint8_t *mac)
+{
+    for (int i = 0; i < devicesCount; ++i)
+    {
+        bool eq = true;
+        for (int j = 0; j < 6; ++j)
+        {
+            if (devices[i].mac[j] != mac[j])
+            {
+                eq = false;
+                break;
+            }
+        }
+        if (eq)
+            return i;
+    }
+    return -1;
+}
+
+static void closeSessionIfNeededInternal(DeviceInfo &d)
+{
+    if (d.sessionStart != 0)
+    {
+        uint32_t end = d.lastSeen;
+        if (end >= d.sessionStart)
+            d.cumulativeSeenMs += (end - d.sessionStart);
+        d.sessionStart = 0;
+    }
+}
+
+// ===== ISR promiscuous callback =====
+void IRAM_ATTR wifi_sniffer_packet(void *buf, wifi_promiscuous_pkt_type_t type)
+{
+    if (!(type == WIFI_PKT_MGMT || type == WIFI_PKT_DATA))
+        return;
+
+    const wifi_promiscuous_pkt_t *ppkt = (wifi_promiscuous_pkt_t *)buf;
+    const wifi_pkt_rx_ctrl_t *rx_ctrl = &ppkt->rx_ctrl;
+    const uint8_t *payload = ppkt->payload;
+    if (!payload)
+        return;
+
+    // leggere frame control (2 bytes)
+    uint16_t fc = ((uint16_t)payload[1] << 8) | payload[0];
+    uint8_t frame_type = (fc & 0x000c) >> 2;
+    uint8_t frame_subtype = (fc & 0x00f0) >> 4;
+
+    // consider management o data
+    if (!(frame_type == 0 || frame_type == 2))
+        return;
+
+    const uint8_t *srcMac = payload + 10; // addr2 in molti frame
+
+    SniffMsg m;
+    memcpy(m.mac, srcMac, 6);
+    m.rssi = rx_ctrl->rssi;
+    m.channel = rx_ctrl->channel;
+    m.frame_type = frame_type;
+    m.frame_subtype = frame_subtype;
+    m.ts = 0;
+
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if (pktQueue)
+    {
+        if (xQueueSendFromISR(pktQueue, &m, &xHigherPriorityTaskWoken) != pdTRUE)
+        {
+            droppedPackets++;
+        }
+        else
+        {
+            portYIELD_FROM_ISR();
+        }
+    }
+}
+
+// ===== Task consumer =====
+static void sniffProcessorTask(void *pv)
+{
+    SniffMsg m;
+    for (;;)
+    {
+        if (xQueueReceive(pktQueue, &m, portMAX_DELAY) == pdTRUE)
+        {
+            // aggiorna tabella dispositivi in modo thread-safe
+            portENTER_CRITICAL(&devicesMux);
+            int idx = findDeviceIndexLocked(m.mac);
+            uint32_t now = millis();
+            if (idx >= 0)
+            {
+                DeviceInfo &d = devices[idx];
+                d.lastRssi = m.rssi;
+                d.lastSeen = now;
+                d.count++;
+                if (d.sessionStart == 0)
+                    d.sessionStart = now;
+            }
+            else
+            {
+                if (devicesCount < MAX_DEVICES)
+                {
+                    DeviceInfo &d = devices[devicesCount];
+                    memcpy(d.mac, m.mac, 6);
+                    d.lastRssi = m.rssi;
+                    d.lastSeen = now;
+                    d.firstSeen = now;
+                    d.count = 1;
+                    d.firstChannel = m.channel;
+                    d.sessionStart = now;
+                    d.cumulativeSeenMs = 0;
+                    devicesCount++;
+                }
+            }
+            portEXIT_CRITICAL(&devicesMux);
+        }
+        taskYIELD();
+    }
+}
+
+// ===== Channel hop task =====
+static void channelHopTask(void *pv)
+{
+    int chan = CHANNEL_MIN;
+    channelHopShouldStop = false;
+    while (!channelHopShouldStop)
+    {
+        esp_wifi_set_channel(chan, WIFI_SECOND_CHAN_NONE);
+        vTaskDelay(pdMS_TO_TICKS(HOP_INTERVAL_MS));
+        chan++;
+        if (chan > CHANNEL_MAX)
+            chan = CHANNEL_MIN;
+    }
+    channelHopHandle = NULL;
+    channelHopShouldStop = false;
+    vTaskDelete(NULL);
+}
+
+// ===== Printer task (opzionale) =====
+static void printerTask(void *pv)
+{
+    unsigned long lastPrint = 0;
+    char macbuf[18];
+    char linebuf[80];
+
+    for (;;)
+    {
+        unsigned long now = millis();
+        if (now - lastPrint >= PRINT_INTERVAL_MS)
+        {
+            lastPrint = now;
+
+            // chiudi sessioni inattive brevemente sotto protezione
+            portENTER_CRITICAL(&devicesMux);
+            for (int i = 0; i < devicesCount; ++i)
+            {
+                if (devices[i].sessionStart != 0 && (now - devices[i].lastSeen) >= INACTIVITY_TIMEOUT_MS)
+                {
+                    closeSessionIfNeededInternal(devices[i]);
+                }
+            }
+            int cnt = devicesCount;
+            portEXIT_CRITICAL(&devicesMux);
+
+            int totalRegistered = 0;
+            int fixedCount = 0;
+            int activeCount = 0;
+            uint64_t sumDwellMs = 0;
+
+            for (int i = 0; i < cnt; ++i)
+            {
+                DeviceInfo tmp;
+                portENTER_CRITICAL(&devicesMux);
+                if (i < devicesCount)
+                    tmp = devices[i];
+                else
+                {
+                    portEXIT_CRITICAL(&devicesMux);
+                    continue;
+                }
+                portEXIT_CRITICAL(&devicesMux);
+
+                if ((now - tmp.lastSeen) >= DEVICE_FORGET_MS)
+                    continue;
+
+                uint32_t totalSeenMs = tmp.cumulativeSeenMs;
+                if (tmp.sessionStart != 0)
+                {
+                    if (now >= tmp.sessionStart)
+                        totalSeenMs += (now - tmp.sessionStart);
+                }
+
+                totalRegistered++;
+                if (totalSeenMs >= FIXED_THRESHOLD_MS)
+                {
+                    fixedCount++;
+                    continue;
+                }
+                if ((now - tmp.lastSeen) <= ACTIVE_WINDOW_MS)
+                {
+                    activeCount++;
+                    sumDwellMs += totalSeenMs;
+                }
+            }
+
+            uint32_t avgDwellS = 0;
+            if (activeCount > 0)
+                avgDwellS = (uint32_t)((sumDwellMs / 1000) / activeCount);
+
+            // Serial.printf("\n-- total:%d fixed:%d active:%d avg_dwell:%lus dropped:%u --\n",
+            //               totalRegistered, fixedCount, activeCount, (unsigned long)avgDwellS, (unsigned int)droppedPackets);
+
+            if (totalRegistered > 0)
+            {
+                avg_time_per_device = (int)(sumDwellMs / 1000 / totalRegistered);
+            }
+            else
+            {
+                avg_time_per_device = 0;
+            }
+
+            // protect against unexpected zero or fractional arithmetic
+            num_devices_sniffed = (int)(totalRegistered - (int)(fixedCount * 0.7));
+
+            // dettaglio attivi
+            for (int i = 0; i < cnt; ++i)
+            {
+                DeviceInfo tmp;
+                portENTER_CRITICAL(&devicesMux);
+                if (i < devicesCount)
+                    tmp = devices[i];
+                else
+                {
+                    portEXIT_CRITICAL(&devicesMux);
+                    continue;
+                }
+                portEXIT_CRITICAL(&devicesMux);
+
+                if ((now - tmp.lastSeen) >= DEVICE_FORGET_MS)
+                    continue;
+
+                uint32_t totalSeenMs = tmp.cumulativeSeenMs;
+                if (tmp.sessionStart != 0)
+                {
+                    if (now >= tmp.sessionStart)
+                        totalSeenMs += (now - tmp.sessionStart);
+                }
+
+                if (totalSeenMs >= FIXED_THRESHOLD_MS)
+                    continue;
+                // if ((now - tmp.lastSeen) <= ACTIVE_WINDOW_MS) {
+                //   snprintf(macbuf, sizeof(macbuf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                //            tmp.mac[0], tmp.mac[1], tmp.mac[2], tmp.mac[3], tmp.mac[4], tmp.mac[5]);
+                //   snprintf(linebuf, sizeof(linebuf), "%s  %lus", macbuf, (unsigned long)(totalSeenMs / 1000));
+                //   Serial.println(linebuf);
+                // }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+}
+
+// ===== API implementazioni =====
+
+void snifferInit()
+{
+    if (_pktQueue == NULL)
+    {
+        _pktQueue = xQueueCreate(256, sizeof(SniffMsg));
+        if (!_pktQueue)
+        {
+            Serial.println("snifferInit: impossibile creare queue");
+            return;
+        }
+        pktQueue = _pktQueue;
+    }
+
+    // create consumer and printer tasks if not already present
+    // It's safe to attempt creation even if they exist; the OS will return error if duplicates.
+    xTaskCreatePinnedToCore(sniffProcessorTask, "sniffProc", 4096, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(printerTask, "printer", 8192, NULL, 1, NULL, 1);
+}
+
+void startSnifferSingleChannel()
+{
+    esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_packet);
+    esp_wifi_set_promiscuous(true);
+}
+
+void stopSniffer()
+{
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(NULL);
+}
+
+void startChannelHopTask()
+{
+    if (channelHopHandle != NULL)
+        return;
+    channelHopShouldStop = false;
+    xTaskCreatePinnedToCore(channelHopTask, "chanHop", 2048, NULL, 1, &channelHopHandle, 1);
+}
+
+void stopChannelHopTask()
+{
+    if (channelHopHandle == NULL)
+        return;
+    channelHopShouldStop = true;
+    // aspetta che finisca (max ~5s)
+    int waits = 0;
+    while (channelHopHandle != NULL && waits++ < 50)
+    {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    channelHopShouldStop = false;
+}
+
+// registra callbacks MQTT
+void setMqttCallbacks(mqtt_disconnect_cb_t disconnectCb, mqtt_reconnect_cb_t reconnectCb)
+{
+    mqttDisconnectCb = disconnectCb;
+    mqttReconnectCb = reconnectCb;
+}
+
+// doFullSweepAndReconnect: esegue sweep completo disconnettendo la STA temporaneamente.
+// Attenzione: questa funzione è bloccante e deve essere lanciata in un task separato.
+void doFullSweepAndReconnect(unsigned long sweepMs)
+{
+    // notifica MQTT disconnect
+    if (mqttDisconnectCb)
+    {
+        mqttDisconnectCb();
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+
+    // ferma eventuale sniffer/hop
+    stopChannelHopTask();
+    stopSniffer();
+
+    // porta la WiFi in modalità NULL per lo sniffing libero
+    WiFi.disconnect(true, true);
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // init WiFi per promiscuous
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    esp_wifi_set_mode(WIFI_MODE_NULL);
+    esp_wifi_start();
+
+    wifi_promiscuous_filter_t filt;
+    filt.filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA;
+    esp_wifi_set_promiscuous_filter(&filt);
+    esp_wifi_set_promiscuous_rx_cb(&wifi_sniffer_packet);
+    esp_wifi_set_promiscuous(true);
+
+    // start hopping
+    startChannelHopTask();
+
+    unsigned long start = millis();
+    while (millis() - start < sweepMs)
+    {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // stop hop & promisc
+    stopChannelHopTask();
+    stopSniffer();
+    esp_wifi_stop();
+    esp_wifi_deinit();
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // ripristina STA
+    WiFi.mode(WIFI_STA);
+    connect_wifi_network();
+
+    // notifica reconnect MQTT
+    if (mqttReconnectCb)
+        mqttReconnectCb();
+}
+
+// ===== Helper pubblici =====
+
+String macToString(const uint8_t *mac)
+{
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+}
+
+int findDeviceIndex(const uint8_t *mac)
+{
+    portENTER_CRITICAL(&devicesMux);
+    int idx = findDeviceIndexLocked(mac);
+    portEXIT_CRITICAL(&devicesMux);
+    return idx;
+}
+
+// handle for the sniffer manager task (loop_0_core)
+TaskHandle_t cycleTaskHandle = NULL;
+// persistent monitor task handle
+TaskHandle_t monitorTaskHandle = NULL;
+// pending reboot to apply sniffer EEPROM change
+bool pendingSnifferReboot = false;
+
+// start sniffer manager (creates loop_0_core task if not running)
+void start_sniffer_manager()
+{
+    if (cycleTaskHandle == NULL)
+    {
+        // if persistent monitor is running, stop it before starting cycle manager
+        if (monitorTaskHandle != NULL)
+        {
+            Serial.println("[SNIF] Deleting persistent monitor task before starting sniffer manager");
+            vTaskDelete(monitorTaskHandle);
+            monitorTaskHandle = NULL;
+        }
+        Serial.println("[SNIF] Starting sniffer manager task...");
+        BaseType_t ok = xTaskCreatePinnedToCore(loop_0_core, "cycle", 8192, NULL, 2, &cycleTaskHandle, 1);
+        if (ok != pdPASS)
+        {
+            Serial.println("[SNIF] Failed to create sniffer manager task");
+            cycleTaskHandle = NULL;
+        }
+        else
+        {
+            sniffer = true;
+        }
+    }
+    else
+    {
+        Serial.println("[SNIF] Sniffer manager already running");
+    }
+}
+
+// stop sniffer manager (deletes task and stops sniffer/hop)
+void stop_sniffer_manager()
+{
+    if (cycleTaskHandle != NULL)
+    {
+        Serial.println("[SNIF] Stopping sniffer manager task...");
+        vTaskDelete(cycleTaskHandle);
+        cycleTaskHandle = NULL;
+    }
+    // ensure sniffer components are stopped
+    stopChannelHopTask();
+    stopSniffer();
+    Serial.println("[SNIF] Sniffer stopped");
+    sniffer = false;
+    // restart persistent monitor if not running
+    if (monitorTaskHandle == NULL)
+    {
+        Serial.println("[SNIF] Restarting persistent monitor task after stopping sniffer");
+        xTaskCreatePinnedToCore(loop_monitoring, "monitor", 8192, NULL, 2, &monitorTaskHandle, 1);
+    }
 }

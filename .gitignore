@@ -6,3 +6,4 @@
 .platformio/.cache/*
 .platformio/packages/*
 .platformio/platforms/*
+.platformio/packages.lock
