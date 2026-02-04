@@ -1,6 +1,9 @@
+#pragma once
+
 /**********************************
  *        LIBRERIE INCLUSE        *
  **********************************/
+// Core
 #include <Arduino.h>
 #include <Wire.h>
 #include <math.h>
@@ -8,12 +11,15 @@
 #include <SoftwareSerial.h>
 #include <time.h>
 #include <TimeLib.h>
+#include "esp_task_wdt.h"
+#include <RTClib.h>  // RTC I2C support
 
-
-// Librerie sensori
+// Sensori
 #include "SHT21.h"
 #include <Multichannel_Gas_GMXXX.h>
 #include "DFRobot_OzoneSensor.h"
+#include "DFRobot_MultiGasSensor.h"
+#undef DBG  // Undefine macro conflittuale prima di includere MICS
 #include "PMserial.h"
 #include "DFRobot_MICS.h"
 #include <sps30.h>
@@ -23,10 +29,10 @@
 #include <BH1750.h>
 #include <ModbusSensorLibrary.h>
 
-// Libreria GPS
+// GPS
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
 
-// Librerie WiFi e MQTT
+// WiFi / MQTT / HTTP
 #include "WiFi.h"
 #include <WiFiClient.h>
 #include <MQTT.h>
@@ -40,7 +46,7 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 
-// OTA e aggiornamenti
+// OTA
 #include <Update.h>
 
 // File system
@@ -49,12 +55,13 @@
 #include "SD.h"
 #include "SPI.h"
 
-// Libreria JSON
+// JSON
 #include "ArduinoJson.h"
 
 // Libreria personalizzata
 //#include "hywdc6e-lib.h"
 
+// STL
 #include <vector>
 
 /**********************************
@@ -81,6 +88,48 @@
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
+
+/**
+ * Configurazione FreeRTOS Task
+ * Core allocation e task priorities
+ */
+namespace TASK_CONFIG 
+{
+    // Core assignment
+    static constexpr BaseType_t CORE_0 = 0;
+    static constexpr BaseType_t CORE_1 = 1;
+    
+    // Priority levels (0=lowest, 25=highest)
+    static constexpr UBaseType_t PRIORITY_IDLE = 0;
+    static constexpr UBaseType_t PRIORITY_LOW = 1;
+    static constexpr UBaseType_t PRIORITY_NORMAL = 2;
+    static constexpr UBaseType_t PRIORITY_HIGH = 3;
+    static constexpr UBaseType_t PRIORITY_VERY_HIGH = 4;
+    
+    // Stack sizes in bytes
+    static constexpr uint32_t STACK_SIZE_SMALL = 2048;
+    static constexpr uint32_t STACK_SIZE_NORMAL = 4096;
+    static constexpr uint32_t STACK_SIZE_LARGE = 8192;
+    static constexpr uint32_t STACK_SIZE_MONITOR = 12288;  // Monitor task needs more memory
+}
+
+/**
+ * Timing configuration per Debug
+ */
+struct DebugTimestamps
+{
+    unsigned long cycleStartMs = 0;
+    unsigned long sweepStartMs = 0;
+    unsigned long lastSweepMs = 0;
+    unsigned long monitorStartMs = 0;
+    unsigned long lastMonitorMs = 0;
+};
+extern DebugTimestamps debugTs;
+
+// Global task handles (usabili come &Task0 in setup)
+extern TaskHandle_t Task0_handle;
+extern TaskHandle_t Task1_handle;
+extern TaskHandle_t Task2_handle;
 
 /**********************************
  *     STRUTTURE DATI SENSORI     *
@@ -116,8 +165,6 @@ struct dataset_t
 /**********************************
  *   DICHIARAZIONI GLOBALI VARI   *
  **********************************/
-int dir = 0;
-int count = 0;
 bool arrived = false;
 bool daresettare = false;
 bool sd = false;
@@ -125,12 +172,12 @@ bool connected = false;
 bool conf = false;
 bool AP = false;
 bool wifi = false;
+bool justConfigured = false;  // Flag per inviare diagnostica subito dopo configurazione
 
 char myConcatenation[12];
 
 String topic = "";
 String nameBinESP = "";
-String nameBinServer;
 String topicListen;
 String timezone_it = "CET-1CEST,M3.5.0,M10.5.0/3";
 const char *verionBoard = STR(YEAR) "V" STR(VERSION);
@@ -138,21 +185,14 @@ const char *verionBoard = STR(YEAR) "V" STR(VERSION);
 /**********************************
  *     VARIABILI DI STATO         *
  **********************************/
-bool sps, ozone, pmsa003, gas, sht, ane, low, lux, soil, sniffer;
+bool sps, ozone, pmsa003, gas, co_hd, no2_hd, o3_hd, so2_hd, sht, ane, low, lux, soil, sniffer;
 bool sen55, scd30, scd41, mics4514;
 bool accesspoint, relay1, relay2;
 
-int i2cControl = 0;
-int GasCicle = 0;
 int saveCounterSD = 0;
 int saveCounterSPIFFS = 0;
 int epochs = 0;
-int tmpRelay, tmpRelay1, tmpPausa, tmpTotale;
 int resetCount = 0;
-
-unsigned long timeNow = 0;
-unsigned long timeLast = 0;
-unsigned long diffe = 0;
 
 volatile int state = LOW;
 volatile int state_short = LOW;
@@ -164,9 +204,16 @@ volatile unsigned long current_low;
  *     OGGETTI SENSORI E HW       *
  **********************************/
 AsyncWebServer server(80);
-TaskHandle_t Task1;
-TaskHandle_t Task2;
 BH1750 lightMeter;
+
+// Sensori Multigas - indirizzo I2C configurato nel costruttore
+DFRobot_GAS_I2C co_hd_sensor(&Wire, 0x74);  // CO_HD sensor @ 0x74
+DFRobot_GAS_I2C no2_hd_sensor(&Wire, 0x76); // NO2_HD sensor @ 0x76
+DFRobot_GAS_I2C o3_hd_sensor(&Wire, 0x75);  // O3_HD sensor @ 0x75
+DFRobot_GAS_I2C so2_hd_sensor(&Wire, 0x77); // SO2_HD sensor @ 0x77
+
+// RTC I2C - DS1307
+RTC_DS1307 rtc_i2c;
 // Semaphore signaled when WiFi is connected via AP/web config or auto-connect
 extern SemaphoreHandle_t wifiConnectedSem;
 // Debug flag: if true, xSemaphoreGive for wifiConnectedSem will be skipped (useful for isolation)
@@ -200,7 +247,6 @@ std::vector<String> Pollutants;
 std::vector<String> PollutantsMissing;
 
 SFE_UBLOX_GNSS myGNSS;
-int GPSBaud = 9600;
 double latitude = 0;
 double longitude = 0;
 byte SIV;
@@ -209,7 +255,6 @@ SPIClass spi = SPIClass();
 WiFiClient clientWifi;
 WiFiClient clientota;
 MQTTClient clientMQTT(512);
-
 /**********************************
  *   SENSOR DATA & MISURE RAW     *
  **********************************/
@@ -217,9 +262,25 @@ MQTTClient clientMQTT(512);
 float O3 = 0.0;
 float adc1_O3, adc2_O3;
 
-// Multigas
+// Multigas (0x08)
 float no2, c2h5oh, voc, co;
 float nh3;
+
+// CO_HD Sensor (0x74)
+float co_hd_ppm = 0.0;
+float co_hd_temp = 0.0;
+
+// NO2_HD Sensor (0x76)
+float no2_hd_ppm = 0.0;
+float no2_hd_temp = 0.0;
+
+// O3_HD Sensor (0x75)
+float o3_hd_ppm = 0.0;
+float o3_hd_temp = 0.0;
+
+// SO2_HD Sensor (0x77)
+float so2_hd_ppm = 0.0;
+float so2_hd_temp = 0.0;
 
 // Calibration constants from PDF
 float GM102B_init = 1.41, GM102B_dV = -1.03, GM102B_ppm = 5;
@@ -286,7 +347,6 @@ char psswdAPssid[10];
 String eeprom_ssid = "";
 String eeprom_psswd = "";
 bool arrivedlow = false;
-bool arrivedsniffer = false;
 
 /**********************************
  *        SERVER/MQTT             *
@@ -426,19 +486,26 @@ static mqtt_reconnect_cb_t mqttReconnectCb = NULL;
 
 const unsigned long SWEEP_DURATION_MS = 20000UL; // 20s sweep
 
-// sincronizzazione sweep -> manager
-static SemaphoreHandle_t sweepDoneSem = NULL;
-
 // flag condiviso monitorDone: il monitor imposta true quando ha finito la sua attività
 static volatile bool monitorDone = false;
 int num_devices_sniffed = 0;
 int avg_time_per_device = 0;
 
-// Funzioni generiche
+// Timer per finestra temporale sniffer (30 secondi)
+unsigned long snifferStartTime = 0;
+const unsigned long SNIFFER_WINDOW_MS = 30000; // 30 secondi
+
+// ============================================================================
+// PROTOTIPI FUNZIONI (ORGANIZZATI PER SEZIONE)
+// ============================================================================
+
+// Utility generiche
 int dir_wind_fix(int dire);
 float round_float(float value);
+bool find_arduino_devices();
+String macToString(const uint8_t *mac);
 
-// EEPROM
+// EEPROM / Configurazione
 void write_inside_eeprom(bool val, int addr);
 void read_topic_eeprom();
 void read_version_eeprom();
@@ -451,16 +518,30 @@ void write_string_eeprom(char *c, int offset);
 void write_string_eeprom(String c, int offset);
 void write_low_eeprom(bool val);
 bool read_low_eeprom();
+bool read_relay1_eeprom();
+void write_relay1_eeprom(bool val);
+bool read_relay2_eeprom();
+void write_relay2_eeprom(bool val);
 void check_vergin_eeprom();
 void delete_info_sensy();
 void delete_wifi_settings();
 
 // I2C e periferiche
 void init_i2c();
+bool check_i2c_bus_health();  // Verifica e recovery blocchi I2C
+bool init_relay(int relayPin);
 
 // Sensori multigas
 bool init_multigas();
 void read_multigas();
+bool init_co_hd();
+void read_co_hd();
+bool init_no2_hd();
+void read_no2_hd();
+bool init_o3_hd();
+void read_o3_hd();
+bool init_so2_hd();
+void read_so2_hd();
 float correct_gas_value(float u, float temp, float humidity, float *u_corr, size_t size);
 float return_ppm_gas_value(float u, float *u2gas, size_t size);
 float get_no2_ppm(uint32_t raw, float temp, float humidity);
@@ -473,33 +554,29 @@ float read_mics(uint8_t gasTypes, const char *gasNames);
 // Sensori specifici
 bool init_ozone();
 int16_t read_ozone();
-
 bool init_pmsA003();
 void read_pmsA003();
-
 bool init_sps30();
 bool read_sps30(float *pm1, float *pm2, float *pm10);
 void print_sps30_values(float pm1, float pm2, float pm10);
-
 bool init_sen55();
 bool read_sen55();
-
 bool init_scd30();
 bool read_scd30();
-
 bool init_scd4x();
 bool read_scd4x();
-
 bool init_luxometer();
 float read_luxometer();
-
+void read_anemometer();
+bool check_soil_moisture();
+void read_soil_moisture();
 void check_sensors_diagnostics();
 void send_sensors_diagnostics();
-
 float calibrate(float raw, float init, float dV, float ppm);
 
 // GPS
 bool init_gps();
+void scan_i2c_devices();  // Debug: scansiona tutti i dispositivi I2C
 
 // RTC e tempo
 void init_rtc();
@@ -508,14 +585,24 @@ int get_epoch_storage();
 unsigned long get_epoch_ntp_server();
 void set_rtc(int timestamp);
 void set_timezone(String timezone);
+unsigned long get_time_with_hierarchy();  // Sincronizzazione con gerarchia di priorità
+
+// RTC I2C (DS1307)
+void init_rtc_i2c();
+void set_rtc_i2c_time(unsigned long epoch);
+unsigned long get_rtc_i2c_time();
+void sync_rtc_i2c_with_ntp();
+bool rtc_i2c_available();
+bool rtc_i2c_lost_power();
 
 // WiFi e Access Point
-bool connect_wifi_network();
+void connect_wifi_network();
 void init_wifi();
 void create_access_point();
 void disconnect_access_point();
 void get_mac_address();
 String get_id_square();
+String get_list_wifi(bool forceRefresh = false);
 
 // MQTT
 void init_mqtt();
@@ -524,6 +611,7 @@ void loop_mqtt();
 bool send_data_mqtt();
 void read_message_received_mqtt(String &topic, String &payload);
 void delete_message_received_mqtt();
+bool check_urgent_mqtt_command();
 void check_reply_ID();
 
 // OTA
@@ -555,37 +643,22 @@ void press_short_time_button();
 void press_long_time_button();
 void check_pressing_button();
 
-// Anemometro
-void read_anemometer();
-
-// Soil Moisture
-bool check_soil_moisture();
-void read_soil_moisture();
-
-// Rele
-bool init_relay(int relayPin);
-
 // Task paralleli
 void loop_monitoring(void *pvParameters);
 void loop_sniffer(void *pvParameters);
 void loop_0_core(void *pv);
 void loop_1_core(void *pv);
 
-// Utility
-bool find_arduino_devices();
-
+// API server / parsing
 bool get_nearest_data(const String &params);
 void parse_response(const String &payload);
 void process_token(const String &token);
 String vector_to_encoded_json_array(const std::vector<String> &vec);
-String get_list_wifi();
 
-// ===== Funzioni esportate =====
+// ===== Funzioni esportate (sniffer) =====
 
 // Implementazione fornita in sniffer.cpp. Puoi registrarla con esp_wifi_set_promiscuous_rx_cb.
 void IRAM_ATTR wifi_sniffer_packet(void* buf, wifi_promiscuous_pkt_type_t type);
-
-// ===== API di controllo (da chiamare dal codice utente) =====
 
 // Inizializza internals dello sniffer (queue, task consumer, printer). Chiamare una volta in setup().
 void snifferInit();
@@ -614,10 +687,6 @@ void stopChannelHopTask();
 // ATTENZIONE: Questa funzione effettua operazioni di WiFi (stop/init) e può bloccare:
 // chiamala da un task separato se non vuoi bloccare il loop principale.
 void doFullSweepAndReconnect(unsigned long sweepMs);
-
-// ===== Helper utili =====
-// Converte MAC in stringa (alloca su stack interno, ritorna String).
-String macToString(const uint8_t *mac);
 
 // Trova indice device (thread-safe se chiami con devicesMux o usi findDeviceIndexLocked in impl).
 int findDeviceIndex(const uint8_t *mac);

@@ -7,3 +7,4 @@
 .platformio/packages/*
 .platformio/platforms/*
 .platformio/packages.lock
+main_old.cpp
