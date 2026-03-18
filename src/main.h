@@ -174,7 +174,7 @@ bool AP = false;
 bool wifi = false;
 bool justConfigured = false;  // Flag per inviare diagnostica subito dopo configurazione
 
-char myConcatenation[12];
+char myConcatenation[13];  // 12 caratteri + 1 NULL terminator
 
 String topic = "";
 String nameBinESP = "";
@@ -642,6 +642,7 @@ bool check_long_press();
 void press_short_time_button();
 void press_long_time_button();
 void check_pressing_button();
+void check_serial_reset(); // Reset via seriale per schede senza BUTTON_RESET_PIN
 
 // Task paralleli
 void loop_monitoring(void *pvParameters);
