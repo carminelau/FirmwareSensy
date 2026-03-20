@@ -691,4 +691,3 @@ void doFullSweepAndReconnect(unsigned long sweepMs);
 
 // Trova indice device (thread-safe se chiami con devicesMux o usi findDeviceIndexLocked in impl).
 int findDeviceIndex(const uint8_t *mac);
-

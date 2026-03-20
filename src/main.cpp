@@ -53,6 +53,293 @@ static NullSerialClass NullSerial;
 #define Serial NullSerial
 #endif
 
+#if FW_LOG_ENABLED
+namespace SERIAL_TRANSLATION
+{
+    struct PhrasePair
+    {
+        const char *italian;
+        const char *english;
+    };
+
+    static const PhrasePair PHRASES[] = {
+        {"Fallimento", "Failure"},
+        {"fallito", "failed"},
+        {"fallita", "failed"},
+        {"impossibile", "unable"},
+        {"Impossibile", "Unable"},
+        {"inizializzazione", "initialization"},
+        {"Inizializzazione", "Initialization"},
+        {"configurazione", "configuration"},
+        {"Configurazione", "Configuration"},
+        {"completata", "completed"},
+        {"riavvio", "reboot"},
+        {"Riavvio", "Reboot"},
+        {"Modalita", "Mode"},
+        {"modalita", "mode"},
+        {"attiva", "active"},
+        {"attivo", "active"},
+        {"rilevata", "detected"},
+        {"rilevato", "detected"},
+        {"NON RILEVATO", "NOT DETECTED"},
+        {"non rilevato", "not detected"},
+        {"Errore", "Error"},
+        {"errore", "error"},
+        {"possibili cause", "possible causes"},
+        {"sensore", "sensor"},
+        {"Sensore", "Sensor"},
+        {"timeout", "timeout"},
+        {"connessione", "connection"},
+        {"Connesso", "Connected"},
+        {"connesso", "connected"},
+        {"disconnesso", "disconnected"},
+        {"scansione", "scan"},
+        {"Scansione", "Scan"},
+        {"sincronizzazione", "synchronization"},
+        {"Sincronizzato", "Synchronized"},
+        {"nessuna fonte disponibile", "no source available"},
+        {"Nessun ACK ricevuto", "No ACK received"},
+        {"Tentativo", "Attempt"},
+        {"Apertura fallita", "Open failed"},
+        {"Nessun altro file disponibile", "No other file available"},
+        {"Pulizia messaggi in coda", "Clearing queued messages"},
+        {"Riconnessione a server", "Reconnecting to server"},
+        {"Stato salvato in EEPROM", "State saved in EEPROM"},
+        {"Reset richiesto", "Reset requested"},
+        {"Dispositivo", "Device"},
+        {"non trovato", "not found"},
+        {"non disponibile", "not available"},
+        {"FILE LOCALE", "LOCAL FILE"},
+        {"NESSUNA FONTE DI TEMPO DISPONIBILE", "NO TIME SOURCE AVAILABLE"},
+        {"potrebbe essere impreciso", "may be inaccurate"},
+        {"ha perso sincronizzazione", "lost synchronization"},
+        {"batteria scarica", "battery drained"},
+        {"Lettura saltata", "Read skipped"},
+        {"prossima disponibile", "next available"},
+        {"Timeout connessione", "Connection timeout"},
+        {"Gerarchia sincronizzazione", "Synchronization hierarchy"},
+        {"MODALITÀ OFFLINE", "OFFLINE MODE"},
+        {"Salvataggio dati locale", "Local data saving"},
+        {"Ora da FILE LOCALE", "Time from LOCAL FILE"},
+        {"Dispositivo non connesso", "Device not connected"},
+        {"Nessuna risposta valida ricevuta", "No valid response received"},
+        {"FALLITO", "FAILED"},
+        {"DIAGNOSTICA", "DIAGNOSTICS"},
+        {"Trovato", "Found"},
+        {"Dispositivo trovato", "Device found"},
+        {"NON DISPONIBILE", "NOT AVAILABLE"},
+        {"inizializzata", "initialized"},
+        {"Stato", "Status"},
+        {"Skip", "Skip"},
+        {"Checking Wire transmission", "Checking Wire transmission"},
+        {"Wire error", "Wire error"},
+        {"Wire OK", "Wire OK"},
+        {"calling begin()", "calling begin()"},
+        {"begin() successful", "successful"},
+        {"Temp compensation", "Temperature compensation"},
+        {"PASSIVITY mode", "PASSIVITY mode"},
+        {"Iterazione", "Iteration"},
+        {"START PROGRAM", "START PROGRAM"},
+        {"Heap", "Memory"},
+        {"Card Failed", "Card failed"},
+        {"f_mount failed", "mounting failed"},
+        {"File system is not mounted", "File system is not mounted"},
+        {"ModbusSensorLibrary", "ModbusSensorLibrary"},
+        {"[OTA]", "[OTA]"},
+        {"[CONFIG]", "[CONFIG]"},
+        {"[MAC]", "[MAC]"},
+        {"[BOOT]", "[BOOT]"},
+        {"[STATUS]", "[STATUS]"},
+        {"[NETWORK]", "[NETWORK]"},
+        {"[LED]", "[LED]"},
+        {"[OK]", "[OK]"},
+        {"[DEBUG]", "[DEBUG]"},
+        {"[I2C]", "[I2C]"},
+        {"[WARNING]", "[WARNING]"},
+        {"[ERROR]", "[ERROR]"},
+        {"[INFO]", "[INFO]"},
+        {"[DIAG]", "[DIAG]"},
+        {"[TIME]", "[TIME]"},
+        {"Tentativo SERVER HTTP", "HTTP Server attempt"},
+        {"Tentativo NTP", "NTP attempt"},
+        {"Tentativo RTC I2C", "I2C RTC attempt"},
+        {"Tentativo FILE LOCALE", "Local file attempt"},
+        {"✓", "✓"},
+        {"✗", "✗"},
+        {"⊘", "⊘"},
+        {"WiFi non connesso", "WiFi not connected"},
+        {"WiFi offline", "WiFi offline"},
+        {"non connesso", "not connected"},
+        {"Dispositivo non connesso", "Device not connected"},
+        {"GREEN", "GREEN"},
+        {"RED", "RED"},
+        {"BLUE", "BLUE"},
+        {"configured", "configured"},
+        {"running", "running"}};
+
+    static String translate_to_english(const String &message)
+    {
+        if (message.indexOf("| EN:") >= 0)
+        {
+            return String();
+        }
+
+        String translated = message;
+        bool changed = false;
+
+        for (size_t i = 0; i < (sizeof(PHRASES) / sizeof(PHRASES[0])); ++i)
+        {
+            if (translated.indexOf(PHRASES[i].italian) >= 0)
+            {
+                translated.replace(PHRASES[i].italian, PHRASES[i].english);
+                changed = true;
+            }
+        }
+
+        if (!changed || translated == message)
+        {
+            return String();
+        }
+
+        return translated;
+    }
+}
+
+class BilingualSerialClass
+{
+public:
+    explicit BilingualSerialClass(HardwareSerial &serialRef) : serialRef_(serialRef) {}
+
+    void begin(unsigned long baudRate)
+    {
+        serialRef_.begin(baudRate);
+    }
+
+    int available()
+    {
+        return serialRef_.available();
+    }
+
+    String readStringUntil(char terminator)
+    {
+        return serialRef_.readStringUntil(terminator);
+    }
+
+    void flush()
+    {
+        serialRef_.flush();
+    }
+
+    template <typename T>
+    size_t print(const T &value)
+    {
+        return serialRef_.print(value);
+    }
+
+    template <typename T>
+    size_t print(const T &value, int format)
+    {
+        return serialRef_.print(value, format);
+    }
+
+    size_t println()
+    {
+        return serialRef_.println();
+    }
+
+    size_t println(const String &message)
+    {
+        return print_bilingual_line(message);
+    }
+
+    size_t println(const char *message)
+    {
+        if (message == NULL)
+        {
+            return serialRef_.println();
+        }
+
+        return print_bilingual_line(String(message));
+    }
+
+    template <typename T>
+    size_t println(const T &value)
+    {
+        return serialRef_.println(value);
+    }
+
+    template <typename T>
+    size_t println(const T &value, int format)
+    {
+        return serialRef_.println(value, format);
+    }
+
+    template <typename... Args>
+    int printf(const char *format, Args... args)
+    {
+        int len = snprintf(nullptr, 0, format, args...);
+        if (len <= 0)
+        {
+            return serialRef_.printf(format, args...);
+        }
+
+        std::vector<char> buffer((size_t)len + 1U);
+        snprintf(buffer.data(), buffer.size(), format, args...);
+        String message(buffer.data());
+
+        // Remove trailing newlines/carriage returns for translation processing
+        bool hadNewline = false;
+        while (message.endsWith("\n") || message.endsWith("\r"))
+        {
+            hadNewline = true;
+            message.remove(message.length() - 1);
+        }
+
+        if (message.length() == 0)
+        {
+            return serialRef_.printf(format, args...);
+        }
+
+        // Always apply translation regardless of newline
+        const String english = SERIAL_TRANSLATION::translate_to_english(message);
+        
+        if (english.length() == 0)
+        {
+            // No translation found, print original
+            if (hadNewline)
+                return serialRef_.println(message);
+            else
+                return serialRef_.print(message);
+        }
+
+        // Print with English translation
+        if (hadNewline)
+            return serialRef_.println(message + " | EN: " + english);
+        else
+            return serialRef_.print(message + " | EN: " + english);
+    }
+
+private:
+    HardwareSerial &serialRef_;
+
+    size_t print_bilingual_line(const String &message)
+    {
+        const String english = SERIAL_TRANSLATION::translate_to_english(message);
+
+        if (english.length() == 0)
+        {
+            return serialRef_.println(message);
+        }
+
+        return serialRef_.println(message + " | EN: " + english);
+    }
+};
+
+static HardwareSerial &RawSerial = ::Serial;
+static BilingualSerialClass SerialBilingual(RawSerial);
+#define Serial SerialBilingual
+#endif
+
 // ============================================================================
 // SEZIONE 1: COSTANTI CENTRALIZZATE
 // ============================================================================
@@ -3000,21 +3287,6 @@ void read_no2_hd()
 
 void read_o3_hd()
 {
-    static unsigned long lastReadTime = 0;
-    const unsigned long READ_INTERVAL_MS = 70000;  // 70 secondi
-    
-    unsigned long now = millis();
-    
-    // Aspetta 70 secondi tra le letture
-    if (now - lastReadTime < READ_INTERVAL_MS)
-    {
-        Serial.printf("DEBUG: O3_HD - Lettura saltata, prossima disponibile tra %lu ms\n", 
-                      READ_INTERVAL_MS - (now - lastReadTime));
-        return;
-    }
-    
-    lastReadTime = now;
-    
     // Lettura factory-calibrated (I2C/UART), valore atteso in ppm per O3
     float ppm = o3_hd_sensor.readGasConcentrationPPM();
 
