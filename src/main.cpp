@@ -3273,7 +3273,7 @@ void read_no2_hd()
         no2_hd_ppm = ppm;
 
         // Convert PPM to µg/m³ for NO2: µg/m³ = PPM × 1.88 (molecular weight factor for NO2)
-        float no2_hd_ug_m3 = no2_hd_ppm * 1.88;
+        float no2_hd_ug_m3 = no2_hd_ppm * 1880 / 500; // divided by 500
 
         // Debug output
         Serial.printf("DEBUG: NO2_HD - PPM: %.2f | µg/m³: %.2f\n",
@@ -3287,26 +3287,24 @@ void read_no2_hd()
 
 void read_o3_hd()
 {
-    // Lettura factory-calibrated (I2C/UART), valore atteso in ppm per O3
+    // Leggi concentrazione O3 in PPM
     float ppm = o3_hd_sensor.readGasConcentrationPPM();
 
-    // Sanity check (range sonda O3: 0-10 ppm)
-    if (ppm >= 0.0f && ppm <= 10.0f)
+    // Validate readings (O3 range 0-10 ppm)
+    if (ppm >= 0 && ppm <= 10)
     {
         o3_hd_ppm = ppm;
 
-        // ppm -> µg/m³ (25°C, 1 atm): µg/m³ = ppm * (MW/24.45) * 1000
-        const float MW_O3_G_MOL = 48.00f;
-        const float MOLAR_VOLUME_25C_L_MOL = 24.45f;
+        // Convert PPM to ug/m3 for O3: ug/m3 = PPM * 1963.19
+        float o3_hd_ug_m3 = o3_hd_ppm * 1960 / 500; // divided by 500;
 
-        const float O3_PPM_TO_UGM3_25C_1ATM = (MW_O3_G_MOL / MOLAR_VOLUME_25C_L_MOL) * 1000.0f; // ~1963.19
-        float o3_hd_ug_m3 = o3_hd_ppm * O3_PPM_TO_UGM3_25C_1ATM;
-
-        Serial.printf("DEBUG: O3_HD - ppm: %.4f | ug/m3: %.2f\n", o3_hd_ppm, o3_hd_ug_m3);
+        // Debug output
+        Serial.printf("DEBUG: O3_HD - PPM: %.2f | ug/m3: %.2f\n",
+                      o3_hd_ppm, o3_hd_ug_m3);
     }
     else
     {
-        Serial.printf("ERROR: O3_HD invalid reading - ppm: %.4f\n", ppm);
+        Serial.printf("ERROR: O3_HD invalid readings - PPM: %.2f\n", ppm);
     }
 }
 
@@ -3372,7 +3370,7 @@ void read_so2_hd()
         so2_hd_ppm = ppm;
 
         // Convert PPM to µg/m³ for SO2: µg/m³ = PPM × 2.62 (molecular weight factor for SO2)
-        float so2_hd_ug_m3 = so2_hd_ppm * 2.62;
+        float so2_hd_ug_m3 = so2_hd_ppm * 2620 / 500; // divided by 500;
 
         // Debug output
         Serial.printf("DEBUG: SO2_HD - PPM: %.2f | µg/m³: %.2f\n",
@@ -3481,7 +3479,7 @@ bool read_scd4x()
 float read_mics(uint8_t gasTypes, const char *gasNames)
 {
     float gasConcentration = mics.getGasData(gasTypes);
-    if (gasConcentration == MICS_ERROR)
+    if (gasConcentration == MICS_ERROR);
     {
         Serial.printf("ERROR: MICS Errore lettura %s\n", gasNames);
         return 0;
