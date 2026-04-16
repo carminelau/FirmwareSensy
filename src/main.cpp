@@ -4028,34 +4028,31 @@ void check_update_OTA()
     Serial.println("[OTA] Checking for OTA updates...");
     Serial.println("[OTA] Current version: " + nameBinESP);
 
+
     // STEP 1: Richiesta HTTP per ricevere la versione dal server
     String response = "";
-    const String resource = "/versione_firmware?ID=" + topic;
-
+    String resource = "/versione_firmware?ID=" + topic + "&board=" + String(BOARD_NAME);
     WiFiClient clientWifi;
     HttpClient httpWifi(clientWifi, host, port);
 
     int err = httpWifi.get(resource);
-    if (err != 0)
-    {
-        Serial.println("ERROR: Errore richiesta versione HTTP");
-        return;
+    int status = httpWifi.responseStatusCode();
+    if (err != 0 || status != 200) {
+        Serial.println("[OTA] Prima richiesta versione HTTP fallita, riprovo senza 'board'...");
+        // Prova senza il campo board
+        resource = "/versione_firmware?ID=" + topic;
+        err = httpWifi.get(resource);
+        status = httpWifi.responseStatusCode();
+        if (err != 0 || status != 200) {
+            Serial.println("ERROR: Errore richiesta versione HTTP anche senza 'board'");
+            return;
+        }
     }
 
-    int status = httpWifi.responseStatusCode();
     Serial.print("[OTA] Server response status: ");
     Serial.println(status);
-
-    if (status == 200)
-    {
-        response = httpWifi.responseBody();
-        Serial.println("[OTA] Server response: " + response);
-    }
-    else
-    {
-        Serial.println("ERROR: Errore risposta server (non 200)");
-        return;
-    }
+    response = httpWifi.responseBody();
+    Serial.println("[OTA] Server response: " + response);
 
     // Pulisci la risposta
     String serverVersion = response;
