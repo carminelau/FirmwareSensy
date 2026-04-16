@@ -2773,12 +2773,12 @@ bool init_no2_hd()
 
     if (!sensorPresence.no2_hd_present)
     {
-        Serial.println("WARNING: ⊘ NO2_HD @ 0x76 NON RILEVATO - SKIP");
+        Serial.println("WARNING: ⊘ NO2_HD @ 0x75 NON RILEVATO - SKIP");
         return false;
     }
 
     Serial.println("[DEBUG] init_no2_hd() - Checking Wire transmission...");
-    Wire.beginTransmission(0x76);
+    Wire.beginTransmission(0x75);
     int error = Wire.endTransmission();
     Serial.printf("[DEBUG] init_no2_hd() - Wire error: %d\n", error);
 
@@ -2824,11 +2824,11 @@ bool init_o3_hd()
 
     if (!sensorPresence.o3_hd_present)
     {
-        Serial.println("WARNING: ⊘ O3_HD @ 0x75 NON RILEVATO - SKIP");
+        Serial.println("WARNING: ⊘ O3_HD @ 0x76 NON RILEVATO - SKIP");
         return false;
     }
 
-    Wire.beginTransmission(0x75);
+    Wire.beginTransmission(0x76);
     int error = Wire.endTransmission();
     Serial.printf("[DEBUG] init_o3_hd() - Wire error: %d\n", error);
     if (error != 0)
