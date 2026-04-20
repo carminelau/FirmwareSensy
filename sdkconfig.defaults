@@ -1,0 +1,3 @@
+# Aumenta stack IPC task per evitare overflow su Core 1
+# Default ESP32-S3: 1536 bytes - insufficiente con librerie Sensirion
+CONFIG_ESP_IPC_TASK_STACK_SIZE=2048

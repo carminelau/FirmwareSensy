@@ -110,7 +110,7 @@ namespace TASK_CONFIG
     static constexpr uint32_t STACK_SIZE_SMALL = 2048;
     static constexpr uint32_t STACK_SIZE_NORMAL = 4096;
     static constexpr uint32_t STACK_SIZE_LARGE = 8192;
-    static constexpr uint32_t STACK_SIZE_MONITOR = 12288;  // Monitor task needs more memory
+    static constexpr uint32_t STACK_SIZE_MONITOR = 16384;  // Monitor task needs more memory (SPS30/SEN55 init + Sensirion libs)
 }
 
 /**
@@ -281,6 +281,14 @@ float o3_hd_temp = 0.0;
 // SO2_HD Sensor (0x77)
 float so2_hd_ppm = 0.0;
 float so2_hd_temp = 0.0;
+
+// Flag di successo ultima lettura sensori HD/SEN55
+// true = l'ultima lettura è stata valida (anche se il valore è 0)
+bool co_hd_read_ok  = false;
+bool no2_hd_read_ok = false;
+bool o3_hd_read_ok  = false;
+bool so2_hd_read_ok = false;
+bool sen55_read_ok  = false;
 
 // Calibration constants from PDF
 float GM102B_init = 1.41, GM102B_dV = -1.03, GM102B_ppm = 5;
