@@ -436,6 +436,9 @@ static SemaphoreHandle_t sweepDoneSem = NULL;
 // Definizioni delle variabili dichiarate come extern in main.h
 SemaphoreHandle_t wifiConnectedSem = NULL;
 bool debugDisableWifiSem = false;
+
+// Mutex per proteggere l'accesso concorrente al bus I2C tra task GPS (loop_1_core) e task sensori (loop_monitoring)
+SemaphoreHandle_t i2cMutex = NULL;
 QueueHandle_t wifiEventQueue = NULL;
 TaskHandle_t wifiNotifierTaskHandle = NULL;
 TaskHandle_t cycleTaskHandle = NULL;
@@ -1117,6 +1120,14 @@ void setup()
     }
 
     Serial.println("[BOOT] Device configured - initializing services...");
+
+    // Crea mutex I2C prima dei task che usano il bus Wire
+    i2cMutex = xSemaphoreCreateMutex();
+    if (i2cMutex == NULL)
+    {
+        Serial.println("ERROR: Fallimento creazione i2cMutex - bus I2C non protetto!");
+    }
+
     BaseType_t watchdog_result = xTaskCreatePinnedToCore(
         loop_0_core,
         "WatchdogTask",
@@ -1481,6 +1492,10 @@ void loop_monitoring(void *pvParameters)
         // Health check periodico del bus I2C con re-scan hot-plug dei sensori.
         if (millis() - lastI2cHealthCheckMs >= I2C_HEALTH_CHECK_INTERVAL)
         {
+            // Prendi il mutex per l'intera sequenza health-check + re-scan + reinit
+            if (i2cMutex != NULL)
+                xSemaphoreTake(i2cMutex, portMAX_DELAY);
+
             bool busHealthy = check_i2c_bus_health();
             bool forceReinit = false;
 
@@ -1492,6 +1507,10 @@ void loop_monitoring(void *pvParameters)
             }
 
             refresh_i2c_runtime_sensors(forceReinit);
+
+            if (i2cMutex != NULL)
+                xSemaphoreGive(i2cMutex);
+
             lastI2cHealthCheckMs = millis();
         }
 
@@ -2389,14 +2408,28 @@ void loop_1_core(void *pvParameters)
     {
         if (GPSsensor)
         {
-            latitude = (double)myGNSS.getLatitude() / 10000000;
-            longitude = (double)myGNSS.getLongitude() / 10000000;
-            SIV = myGNSS.getSIV();
-
-            if (millis() > 5000 && (!myGNSS.isConnected()))
+            // Proteggi le letture GPS da race condition con loop_monitoring (stesso bus I2C)
+            if (i2cMutex != NULL && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE)
             {
-                Serial.println("WARNING: GPS non rilevato");
-                vTaskDelay(pdMS_TO_TICKS(1000));
+                latitude = (double)myGNSS.getLatitude() / 10000000;
+                longitude = (double)myGNSS.getLongitude() / 10000000;
+                SIV = myGNSS.getSIV();
+                xSemaphoreGive(i2cMutex);
+            }
+
+            if (millis() > 5000)
+            {
+                bool connected_gps = false;
+                if (i2cMutex != NULL && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE)
+                {
+                    connected_gps = myGNSS.isConnected();
+                    xSemaphoreGive(i2cMutex);
+                }
+                if (!connected_gps)
+                {
+                    Serial.println("WARNING: GPS non rilevato");
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                }
             }
         }
 
@@ -2596,7 +2629,7 @@ void init_i2c()
 
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(100000); // 100kHz - velocità sicura per sensori multiple
-    Wire.setTimeOut(5000); // 5s timeout massimo - più breve per liberare boot se bus è corrotto
+    Wire.setTimeOut(500);  // 500ms timeout - abbastanza per sensori lenti, evita hang prolungati
 
     // Verifica che il bus I2C sia libero (non bloccato)
     Wire.beginTransmission(0x00);
@@ -2618,40 +2651,12 @@ void init_i2c()
 }
 
 /**
- * Verifica integrità del bus I2C e recupera da blocchi
- * Diagnostica: misura SDA/SCL pulses, rileva stuck
+ * Verifica integrità del bus I2C e recupera da blocchi tramite Wire probe.
+ * Non usa pinMode() sui pin I2C per evitare interferenza con il GPIO matrix dell'ESP32.
  * @return true se bus OK
  */
 bool check_i2c_bus_health()
 {
-    pinMode(SCL_PIN, INPUT_PULLUP);
-    pinMode(SDA_PIN, INPUT_PULLUP);
-    int sclLevel = digitalRead(SCL_PIN);
-    int sdaLevel = digitalRead(SDA_PIN);
-
-    if (sclLevel == LOW || sdaLevel == LOW)
-    {
-        Serial.printf("WARNING: ✗ Bus I2C line stuck (SCL=%d SDA=%d) - tentativo recovery\n", sclLevel, sdaLevel);
-
-        // Recovery classico I2C: clock pulses su SCL per liberare slave bloccati.
-        pinMode(SCL_PIN, OUTPUT_OPEN_DRAIN);
-        pinMode(SDA_PIN, INPUT_PULLUP);
-        digitalWrite(SCL_PIN, HIGH);
-        delayMicroseconds(5);
-
-        for (int i = 0; i < 16; i++)
-        {
-            digitalWrite(SCL_PIN, LOW);
-            delayMicroseconds(8);
-            digitalWrite(SCL_PIN, HIGH);
-            delayMicroseconds(8);
-        }
-
-        pinMode(SCL_PIN, INPUT_PULLUP);
-        pinMode(SDA_PIN, INPUT_PULLUP);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
     // Probe veloce con indirizzo dummy: errore 2 (NACK) e 0 indicano bus vivo.
     Wire.beginTransmission(0x00);
     int result = Wire.endTransmission(true); // true = send STOP
@@ -2664,25 +2669,22 @@ bool check_i2c_bus_health()
     {
         Serial.printf("ERROR: ✗ Bus I2C: Errore sconosciuto (%d) - possibile clock stuck o SDA bloccato\n", result);
 
-        Serial.println("WARNING: ✗ Bus I2C:   Tentativo di recovery: 16 clock pulses...");
-        gpio_set_direction((gpio_num_t)SCL_PIN, GPIO_MODE_OUTPUT_OD);
-
-        for (int i = 0; i < 16; i++)
-        {
-            digitalWrite(SCL_PIN, LOW);
-            delayMicroseconds(8);
-            digitalWrite(SCL_PIN, HIGH);
-            delayMicroseconds(8);
-        }
-
-        gpio_set_direction((gpio_num_t)SCL_PIN, GPIO_MODE_INPUT_OUTPUT_OD);
-        vTaskDelay(pdMS_TO_TICKS(100));
+        // Recovery via Wire.end()/Wire.begin() per liberare il periferico I2C bloccato.
+        // Non usiamo pinMode() sui pin I2C per evitare di disconnettere il GPIO matrix.
+        Serial.println("WARNING: ✗ Bus I2C: Tentativo recovery Wire.end()/Wire.begin()...");
+        Wire.end();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        Wire.begin(SDA_PIN, SCL_PIN);
+        Wire.setClock(100000);
+        Wire.setTimeOut(500);
+        vTaskDelay(pdMS_TO_TICKS(50));
 
         Wire.beginTransmission(0x00);
         result = Wire.endTransmission(true);
 
         if (result == 0 || result == 2)
         {
+            Serial.println("INFO: ✓ Bus I2C recuperato con successo");
             return true;
         }
 
@@ -3351,11 +3353,24 @@ void read_multigas()
 
 void read_co_hd()
 {
-    // Leggi concentrazione CO in PPM
+    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    {
+        Serial.println("ERROR: CO_HD - impossibile acquisire mutex I2C, skip lettura");
+        return;
+    }
     float ppm = co_hd_sensor.readGasConcentrationPPM();
+    xSemaphoreGive(i2cMutex);
+
+    // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
+    if (ppm < 0)
+    {
+        Serial.printf("ERROR: CO_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
+        co_hd = false;
+        return;
+    }
 
     // Validate readings (CO range 0-1000 ppm)
-    if (ppm >= 0 && ppm <= 1000)
+    if (ppm <= 1000)
     {
         co_hd_ppm = ppm;
 
@@ -3374,11 +3389,24 @@ void read_co_hd()
 
 void read_no2_hd()
 {
-    // Leggi concentrazione NO2 in PPM
+    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    {
+        Serial.println("ERROR: NO2_HD - impossibile acquisire mutex I2C, skip lettura");
+        return;
+    }
     float ppm = no2_hd_sensor.readGasConcentrationPPM();
+    xSemaphoreGive(i2cMutex);
+
+    // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
+    if (ppm < 0)
+    {
+        Serial.printf("ERROR: NO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
+        no2_hd = false;
+        return;
+    }
 
     // Validate readings (NO2 range 0-20 ppm)
-    if (ppm >= 0 && ppm <= 20)
+    if (ppm <= 20)
     {
         no2_hd_ppm = ppm;
 
@@ -3397,11 +3425,25 @@ void read_no2_hd()
 
 void read_o3_hd()
 {
+    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    {
+        Serial.println("ERROR: O3_HD - impossibile acquisire mutex I2C, skip lettura");
+        return;
+    }
     // Lettura factory-calibrated (I2C/UART), valore atteso in ppm per O3
     float ppm = o3_hd_sensor.readGasConcentrationPPM();
+    xSemaphoreGive(i2cMutex);
+
+    // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
+    if (ppm < 0)
+    {
+        Serial.printf("ERROR: O3_HD errore I2C (ppm=%.4f) - disabilito sensore fino al prossimo scan\n", ppm);
+        o3_hd = false;
+        return;
+    }
 
     // Sanity check (range sonda O3: 0-10 ppm)
-    if (ppm >= 0.0f && ppm <= 10.0f)
+    if (ppm <= 10.0f)
     {
         o3_hd_ppm = ppm;
 
@@ -3473,11 +3515,24 @@ bool init_so2_hd()
 
 void read_so2_hd()
 {
-    // Leggi concentrazione SO2 in PPM
+    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    {
+        Serial.println("ERROR: SO2_HD - impossibile acquisire mutex I2C, skip lettura");
+        return;
+    }
     float ppm = so2_hd_sensor.readGasConcentrationPPM();
+    xSemaphoreGive(i2cMutex);
+
+    // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
+    if (ppm < 0)
+    {
+        Serial.printf("ERROR: SO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
+        so2_hd = false;
+        return;
+    }
 
     // Validate readings (SO2 range 0-10 ppm)
-    if (ppm >= 0 && ppm <= 10)
+    if (ppm <= 10)
     {
         so2_hd_ppm = ppm;
 
