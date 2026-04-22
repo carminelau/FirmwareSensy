@@ -1125,7 +1125,8 @@ void setup()
     i2cMutex = xSemaphoreCreateMutex();
     if (i2cMutex == NULL)
     {
-        Serial.println("ERROR: Fallimento creazione i2cMutex - bus I2C non protetto!");
+        Serial.println("CRITICAL: Fallimento creazione i2cMutex - operazioni I2C non sicure tra task!");
+        // Il codice continua ma senza protezione: NULL check in ogni accesso I2C gestisce il caso
     }
 
     BaseType_t watchdog_result = xTaskCreatePinnedToCore(
@@ -2408,7 +2409,8 @@ void loop_1_core(void *pvParameters)
     {
         if (GPSsensor)
         {
-            // Proteggi le letture GPS da race condition con loop_monitoring (stesso bus I2C)
+            // Proteggi le letture GPS da race condition con loop_monitoring (stesso bus I2C).
+            // Timeout breve (200ms): il GPS viene letto ogni ~1s, saltare un poll è accettabile.
             if (i2cMutex != NULL && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE)
             {
                 latitude = (double)myGNSS.getLatitude() / 10000000;
@@ -3370,7 +3372,7 @@ void read_co_hd()
     }
 
     // Validate readings (CO range 0-1000 ppm)
-    if (ppm <= 1000)
+    if (ppm >= 0 && ppm <= 1000)
     {
         co_hd_ppm = ppm;
 
@@ -3406,7 +3408,7 @@ void read_no2_hd()
     }
 
     // Validate readings (NO2 range 0-20 ppm)
-    if (ppm <= 20)
+    if (ppm >= 0 && ppm <= 20)
     {
         no2_hd_ppm = ppm;
 
@@ -3443,7 +3445,7 @@ void read_o3_hd()
     }
 
     // Sanity check (range sonda O3: 0-10 ppm)
-    if (ppm <= 10.0f)
+    if (ppm >= 0.0f && ppm <= 10.0f)
     {
         o3_hd_ppm = ppm;
 
@@ -3532,7 +3534,7 @@ void read_so2_hd()
     }
 
     // Validate readings (SO2 range 0-10 ppm)
-    if (ppm <= 10)
+    if (ppm >= 0 && ppm <= 10)
     {
         so2_hd_ppm = ppm;
 
