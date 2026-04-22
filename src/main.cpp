@@ -1,4 +1,4 @@
-﻿/*
+﻿﻿/*
  * FirmwareSensy - VERSIONE COMPLETA MIGLIORATA (main2.cpp)
  *
  * Questo file rappresenta una versione REFACTORIZZATA di main.cpp con:
@@ -1460,6 +1460,7 @@ void loop_monitoring(void *pvParameters)
     const unsigned long LOW_POWER_CYCLE_DURATION = 300000UL; // 5 minuti per ciclo in low power (300 secondi)
     static unsigned long lastI2cHealthCheckMs = 0;
     const unsigned long I2C_HEALTH_CHECK_INTERVAL = 60000UL; // 60 secondi
+    lastI2cHealthCheckMs = millis();
 
     // Avvia sniffer all'inizio del loop di monitoring
     if (sniffer)
@@ -2592,29 +2593,12 @@ void init_i2c()
 {
     // Configurazione I2C con parametri robusti per ESP32
     // Frequenza: 100kHz (standard per compatibilità con sensori lenti)
-    // Timeout: 5000ms (5 secondi) per evitare hang prolungato su bus corrotto
-
+    // Timeout corto per evitare lock-up prolungati su bus degradato
+    Wire.end();
+    vTaskDelay(pdMS_TO_TICKS(10));
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(100000); // 100kHz - velocità sicura per sensori multiple
-    Wire.setTimeOut(5000); // 5s timeout massimo - più breve per liberare boot se bus è corrotto
-
-    // Verifica che il bus I2C sia libero (non bloccato)
-    Wire.beginTransmission(0x00);
-    int error = Wire.endTransmission();
-
-    if (error == 0)
-    {
-    }
-    else if (error == 4)
-    {
-        Serial.println("ERROR: ✗ Bus I2C: Errore sconosciuto (possibile clock stuck?)");
-        Serial.println("WARNING: ✗ Bus I2C:   Tentativo reset hardware...");
-        // Reset software del bus I2C
-        Wire.end();
-        vTaskDelay(pdMS_TO_TICKS(100));
-        Wire.begin(SDA_PIN, SCL_PIN);
-        Wire.setClock(100000);
-    }
+    Wire.setTimeOut(250);  // 250ms timeout massimo
 }
 
 /**
@@ -2624,61 +2608,25 @@ void init_i2c()
  */
 bool check_i2c_bus_health()
 {
-    pinMode(SCL_PIN, INPUT_PULLUP);
-    pinMode(SDA_PIN, INPUT_PULLUP);
-    int sclLevel = digitalRead(SCL_PIN);
-    int sdaLevel = digitalRead(SDA_PIN);
-
-    if (sclLevel == LOW || sdaLevel == LOW)
-    {
-        Serial.printf("WARNING: ✗ Bus I2C line stuck (SCL=%d SDA=%d) - tentativo recovery\n", sclLevel, sdaLevel);
-
-        // Recovery classico I2C: clock pulses su SCL per liberare slave bloccati.
-        pinMode(SCL_PIN, OUTPUT_OPEN_DRAIN);
-        pinMode(SDA_PIN, INPUT_PULLUP);
-        digitalWrite(SCL_PIN, HIGH);
-        delayMicroseconds(5);
-
-        for (int i = 0; i < 16; i++)
-        {
-            digitalWrite(SCL_PIN, LOW);
-            delayMicroseconds(8);
-            digitalWrite(SCL_PIN, HIGH);
-            delayMicroseconds(8);
-        }
-
-        pinMode(SCL_PIN, INPUT_PULLUP);
-        pinMode(SDA_PIN, INPUT_PULLUP);
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    // Probe veloce con indirizzo dummy: errore 2 (NACK) e 0 indicano bus vivo.
-    Wire.beginTransmission(0x00);
+    // Probe Wire non invasivo: evita di riconfigurare SDA/SCL a runtime.
+    Wire.beginTransmission(0x70);
     int result = Wire.endTransmission(true); // true = send STOP
 
     if (result == 0 || result == 2)
     {
         return true;
     }
-    else if (result == 4)
+    else if (result == 4 || result == 5)
     {
-        Serial.printf("ERROR: ✗ Bus I2C: Errore sconosciuto (%d) - possibile clock stuck o SDA bloccato\n", result);
+        Serial.printf("WARNING: [I2C] Health check fallito (error=%d), retry dopo re-init controller\n", result);
 
-        Serial.println("WARNING: ✗ Bus I2C:   Tentativo di recovery: 16 clock pulses...");
-        gpio_set_direction((gpio_num_t)SCL_PIN, GPIO_MODE_OUTPUT_OD);
+        Wire.end();
+        vTaskDelay(pdMS_TO_TICKS(20));
+        Wire.begin(SDA_PIN, SCL_PIN);
+        Wire.setClock(100000);
+        Wire.setTimeOut(250);
 
-        for (int i = 0; i < 16; i++)
-        {
-            digitalWrite(SCL_PIN, LOW);
-            delayMicroseconds(8);
-            digitalWrite(SCL_PIN, HIGH);
-            delayMicroseconds(8);
-        }
-
-        gpio_set_direction((gpio_num_t)SCL_PIN, GPIO_MODE_INPUT_OUTPUT_OD);
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        Wire.beginTransmission(0x00);
+        Wire.beginTransmission(0x70);
         result = Wire.endTransmission(true);
 
         if (result == 0 || result == 2)
