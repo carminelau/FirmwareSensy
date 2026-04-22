@@ -1,4 +1,4 @@
-﻿/*
+﻿﻿/*
  * FirmwareSensy - VERSIONE COMPLETA MIGLIORATA (main2.cpp)
  *
  * Questo file rappresenta una versione REFACTORIZZATA di main.cpp con:
@@ -1472,6 +1472,7 @@ void loop_monitoring(void *pvParameters)
     const unsigned long LOW_POWER_CYCLE_DURATION = 300000UL; // 5 minuti per ciclo in low power (300 secondi)
     static unsigned long lastI2cHealthCheckMs = 0;
     const unsigned long I2C_HEALTH_CHECK_INTERVAL = 60000UL; // 60 secondi
+    lastI2cHealthCheckMs = millis();
 
     // Avvia sniffer all'inizio del loop di monitoring
     if (sniffer)
@@ -2627,8 +2628,9 @@ void init_i2c()
 {
     // Configurazione I2C con parametri robusti per ESP32
     // Frequenza: 100kHz (standard per compatibilità con sensori lenti)
-    // Timeout: 5000ms (5 secondi) per evitare hang prolungato su bus corrotto
-
+    // Timeout corto per evitare lock-up prolungati su bus degradato
+    Wire.end();
+    vTaskDelay(pdMS_TO_TICKS(10));
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(100000); // 100kHz - velocità sicura per sensori multiple
     Wire.setTimeOut(500);  // 500ms timeout - abbastanza per sensori lenti, evita hang prolungati
@@ -2667,7 +2669,7 @@ bool check_i2c_bus_health()
     {
         return true;
     }
-    else if (result == 4)
+    else if (result == 4 || result == 5)
     {
         Serial.printf("ERROR: ✗ Bus I2C: Errore sconosciuto (%d) - possibile clock stuck o SDA bloccato\n", result);
 
@@ -2681,7 +2683,7 @@ bool check_i2c_bus_health()
         Wire.setTimeOut(500);
         vTaskDelay(pdMS_TO_TICKS(50));
 
-        Wire.beginTransmission(0x00);
+        Wire.beginTransmission(0x70);
         result = Wire.endTransmission(true);
 
         if (result == 0 || result == 2)
