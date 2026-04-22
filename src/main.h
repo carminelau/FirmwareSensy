@@ -216,6 +216,8 @@ DFRobot_GAS_I2C so2_hd_sensor(&Wire, 0x77); // SO2_HD sensor @ 0x77
 RTC_DS1307 rtc_i2c;
 // Semaphore signaled when WiFi is connected via AP/web config or auto-connect
 extern SemaphoreHandle_t wifiConnectedSem;
+// Mutex per proteggere l'accesso concorrente al bus I2C tra i task
+extern SemaphoreHandle_t i2cMutex;
 // Debug flag: if true, xSemaphoreGive for wifiConnectedSem will be skipped (useful for isolation)
 extern bool debugDisableWifiSem;
 // Queue for delegating wifi-connected events from ISRs/handlers to notifier task
