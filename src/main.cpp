@@ -1,4 +1,4 @@
-﻿﻿/*
+﻿/*
  * FirmwareSensy - VERSIONE COMPLETA MIGLIORATA (main2.cpp)
  *
  * Questo file rappresenta una versione REFACTORIZZATA di main.cpp con:
