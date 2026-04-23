@@ -539,6 +539,7 @@ void delete_wifi_settings();
 // I2C e periferiche
 void init_i2c();
 bool check_i2c_bus_health();  // Verifica e recovery blocchi I2C
+bool i2c_bus_recover_bitbang(); // Recovery hardware: clock cycling SDA/SCL bloccati
 bool init_relay(int relayPin);
 
 // Sensori multigas
