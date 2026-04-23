@@ -471,6 +471,12 @@ struct I2CSensorPresence
 // Flag per tracciare se scansione è stata completata
 bool i2c_scan_completed = false;
 
+// Contatore errori I2C consecutivi (incrementato da ogni read_*_hd che fallisce,
+// decrementato da letture riuscite). Quando supera I2C_ERROR_THRESHOLD viene
+// attivata la procedura di recovery immediata nel loop_monitoring.
+static volatile int i2c_consecutive_errors = 0;
+static const int I2C_ERROR_THRESHOLD = 3; // soglia per recovery immediato
+
 // ============================================================================
 // SEZIONE 3: TASK E NOTIFICHE
 // ============================================================================
@@ -1454,6 +1460,7 @@ void read_anemometer();
 void read_soil_moisture();
 void refresh_i2c_runtime_sensors(bool forceReinit = false);
 void i2c_bus_settle(uint32_t delayMs = 250);
+bool i2c_bus_recover_bitbang();
 
 /**
  * Task eseguito su Core 1
@@ -1471,7 +1478,7 @@ void loop_monitoring(void *pvParameters)
     const unsigned long CYCLE_TIMEOUT_LOW_POWER = 90000UL;   // 90 secondi timeout massimo in low power
     const unsigned long LOW_POWER_CYCLE_DURATION = 300000UL; // 5 minuti per ciclo in low power (300 secondi)
     static unsigned long lastI2cHealthCheckMs = 0;
-    const unsigned long I2C_HEALTH_CHECK_INTERVAL = 60000UL; // 60 secondi
+    const unsigned long I2C_HEALTH_CHECK_INTERVAL = 30000UL; // 30 secondi (era 60s)
     lastI2cHealthCheckMs = millis();
 
     // Avvia sniffer all'inizio del loop di monitoring
@@ -1491,15 +1498,21 @@ void loop_monitoring(void *pvParameters)
         debugTs.monitorStartMs = millis();
         timeNow = debugTs.monitorStartMs;
 
+        // Recupero immediato se troppi errori I2C consecutivi rilevati dai sensori
+        bool earlyRecovery = (i2c_consecutive_errors >= I2C_ERROR_THRESHOLD);
+
         // Health check periodico del bus I2C con re-scan hot-plug dei sensori.
-        if (millis() - lastI2cHealthCheckMs >= I2C_HEALTH_CHECK_INTERVAL)
+        if (earlyRecovery || (millis() - lastI2cHealthCheckMs >= I2C_HEALTH_CHECK_INTERVAL))
         {
+            if (earlyRecovery)
+                Serial.printf("WARNING: [I2C] Recovery anticipato (errori consecutivi: %d)\n", i2c_consecutive_errors);
+
             // Prendi il mutex per l'intera sequenza health-check + re-scan + reinit
             if (i2cMutex != NULL)
                 xSemaphoreTake(i2cMutex, portMAX_DELAY);
 
             bool busHealthy = check_i2c_bus_health();
-            bool forceReinit = false;
+            bool forceReinit = earlyRecovery; // Forza reinit se recovery anticipato
 
             if (!busHealthy)
             {
@@ -1509,6 +1522,7 @@ void loop_monitoring(void *pvParameters)
             }
 
             refresh_i2c_runtime_sensors(forceReinit);
+            i2c_consecutive_errors = 0; // Reset dopo health-check
 
             if (i2cMutex != NULL)
                 xSemaphoreGive(i2cMutex);
@@ -2626,6 +2640,10 @@ void init_wifi()
 
 void init_i2c()
 {
+    // Tenta recovery hardware (bit-bang) prima di reinizializzare Wire,
+    // per liberare SDA eventualmente bloccata da un sensore.
+    i2c_bus_recover_bitbang();
+
     // Configurazione I2C con parametri robusti per ESP32
     // Frequenza: 100kHz (standard per compatibilità con sensori lenti)
     // Timeout corto per evitare lock-up prolungati su bus degradato
@@ -2655,8 +2673,89 @@ void init_i2c()
 }
 
 /**
- * Verifica integrità del bus I2C e recupera da blocchi tramite Wire probe.
- * Non usa pinMode() sui pin I2C per evitare interferenza con il GPIO matrix dell'ESP32.
+ * Recovery hardware del bus I2C tramite bit-bang clock cycling (NXP AN10216).
+ *
+ * Procedura:
+ *   1. Legge lo stato di SDA: se è già HIGH il bus non è bloccato.
+ *   2. Se SDA è LOW, eroga fino a 9 impulsi su SCL per sbloccare il byte
+ *      in transito nel sensore bloccato.
+ *   3. Invia una condizione di STOP software (SCL=HIGH, poi SDA LOW→HIGH).
+ *   4. Lascia SDA/SCL in stato INPUT (pull-up hardware) prima di richiamare
+ *      Wire.begin(), che riconfigura il GPIO matrix per l'I2C.
+ *
+ * NOTA: Usa temporaneamente pinMode()/digitalWrite() sui pin SDA/SCL.
+ *       Wire.begin() ripristina il GPIO matrix correttamente dopo questo uso.
+ *
+ * @return true se SDA è libera al termine della procedura
+ */
+bool i2c_bus_recover_bitbang()
+{
+    // Rilascia il periferico I2C hardware prima di usare i pin in GPIO mode
+    Wire.end();
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // Configura SCL come output open-drain (HIGH = rilasciato) e SDA come input
+    pinMode(SCL_PIN, OUTPUT);
+    digitalWrite(SCL_PIN, HIGH);
+    pinMode(SDA_PIN, INPUT);
+    delayMicroseconds(10);
+
+    if (digitalRead(SDA_PIN) == HIGH)
+    {
+        // Bus libero: nessuna azione necessaria, riconfigurazione Wire delegata al chiamante
+        pinMode(SCL_PIN, INPUT);
+        return true;
+    }
+
+    Serial.println("WARNING: [I2C] SDA bloccata LOW - avvio clock-cycling recovery (NXP AN10216)");
+
+    // Eroga fino a 9 impulsi SCL per completare il byte in transito nel sensore
+    for (int i = 0; i < 9; i++)
+    {
+        // SCL LOW → HIGH (impulso): periodo ~10µs a 100kHz
+        digitalWrite(SCL_PIN, LOW);
+        delayMicroseconds(5);
+        digitalWrite(SCL_PIN, HIGH);
+        delayMicroseconds(5);
+
+        if (digitalRead(SDA_PIN) == HIGH)
+        {
+            Serial.printf("INFO: [I2C] SDA liberata dopo %d impulsi SCL\n", i + 1);
+            break;
+        }
+    }
+
+    // Invia condizione di STOP: SCL=HIGH, poi SDA LOW→HIGH
+    // Prima assicura SDA bassa (per generare lo slave release)
+    pinMode(SDA_PIN, OUTPUT);
+    digitalWrite(SDA_PIN, LOW);
+    delayMicroseconds(5);
+    digitalWrite(SCL_PIN, HIGH);
+    delayMicroseconds(5);
+    digitalWrite(SDA_PIN, HIGH); // Fronte di salita SDA mentre SCL=HIGH → STOP
+    delayMicroseconds(10);
+
+    // Rilascia entrambi i pin (pull-up hardware gestirà il livello)
+    pinMode(SCL_PIN, INPUT);
+    pinMode(SDA_PIN, INPUT);
+    delayMicroseconds(10);
+
+    bool sdaFree = (digitalRead(SDA_PIN) == HIGH);
+    if (sdaFree)
+    {
+        Serial.println("INFO: [I2C] Bus liberato con successo tramite bit-bang recovery");
+    }
+    else
+    {
+        Serial.println("ERROR: [I2C] SDA ancora bloccata dopo bit-bang recovery - necessario power cycle sensori");
+    }
+    return sdaFree;
+}
+
+/**
+ * Verifica integrità del bus I2C e recupera da blocchi.
+ * Usa prima il bit-bang recovery (clock cycling) per liberare SDA fisicamente bloccata,
+ * poi reinizializza il periferico Wire.
  * @return true se bus OK
  */
 bool check_i2c_bus_health()
@@ -2671,27 +2770,33 @@ bool check_i2c_bus_health()
     }
     else if (result == 4 || result == 5)
     {
-        Serial.printf("ERROR: ✗ Bus I2C: Errore sconosciuto (%d) - possibile clock stuck o SDA bloccato\n", result);
+        Serial.printf("ERROR: ✗ Bus I2C: Errore (%d) - possibile clock stuck o SDA bloccato\n", result);
 
-        // Recovery via Wire.end()/Wire.begin() per liberare il periferico I2C bloccato.
-        // Non usiamo pinMode() sui pin I2C per evitare di disconnettere il GPIO matrix.
-        Serial.println("WARNING: ✗ Bus I2C: Tentativo recovery Wire.end()/Wire.begin()...");
-        Wire.end();
+        // Recovery hardware tramite bit-bang clock cycling prima di reinizializzare Wire.
+        // i2c_bus_recover_bitbang() chiama Wire.end() internamente.
+        Serial.println("WARNING: ✗ Bus I2C: Tentativo bit-bang recovery...");
+        bool recovered = i2c_bus_recover_bitbang();
+
+        // Reinizializza il periferico I2C dopo il bit-bang
         vTaskDelay(pdMS_TO_TICKS(50));
         Wire.begin(SDA_PIN, SCL_PIN);
         Wire.setClock(100000);
         Wire.setTimeOut(500);
         vTaskDelay(pdMS_TO_TICKS(50));
 
-        Wire.beginTransmission(0x70);
+        // Verifica finale
+        Wire.beginTransmission(0x00);
         result = Wire.endTransmission(true);
 
         if (result == 0 || result == 2)
         {
             Serial.println("INFO: ✓ Bus I2C recuperato con successo");
+            i2c_consecutive_errors = 0;
             return true;
         }
 
+        Serial.printf("ERROR: ✗ Bus I2C non recuperato dopo bit-bang (SDA libera=%s, probe=%d)\n",
+                      recovered ? "si" : "no", result);
         return false;
     }
 
@@ -3360,6 +3465,7 @@ void read_co_hd()
     if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
     {
         Serial.println("ERROR: CO_HD - impossibile acquisire mutex I2C, skip lettura");
+        i2c_consecutive_errors++;
         return;
     }
     float ppm = co_hd_sensor.readGasConcentrationPPM();
@@ -3370,8 +3476,13 @@ void read_co_hd()
     {
         Serial.printf("ERROR: CO_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
         co_hd = false;
+        i2c_consecutive_errors++;
         return;
     }
+
+    // Lettura valida: resetta contatore errori
+    if (i2c_consecutive_errors > 0)
+        i2c_consecutive_errors--;
 
     // Validate readings (CO range 0-1000 ppm)
     if (ppm >= 0 && ppm <= 1000)
@@ -3396,6 +3507,7 @@ void read_no2_hd()
     if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
     {
         Serial.println("ERROR: NO2_HD - impossibile acquisire mutex I2C, skip lettura");
+        i2c_consecutive_errors++;
         return;
     }
     float ppm = no2_hd_sensor.readGasConcentrationPPM();
@@ -3406,8 +3518,13 @@ void read_no2_hd()
     {
         Serial.printf("ERROR: NO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
         no2_hd = false;
+        i2c_consecutive_errors++;
         return;
     }
+
+    // Lettura valida: resetta contatore errori
+    if (i2c_consecutive_errors > 0)
+        i2c_consecutive_errors--;
 
     // Validate readings (NO2 range 0-20 ppm)
     if (ppm >= 0 && ppm <= 20)
@@ -3432,6 +3549,7 @@ void read_o3_hd()
     if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
     {
         Serial.println("ERROR: O3_HD - impossibile acquisire mutex I2C, skip lettura");
+        i2c_consecutive_errors++;
         return;
     }
     // Lettura factory-calibrated (I2C/UART), valore atteso in ppm per O3
@@ -3443,8 +3561,13 @@ void read_o3_hd()
     {
         Serial.printf("ERROR: O3_HD errore I2C (ppm=%.4f) - disabilito sensore fino al prossimo scan\n", ppm);
         o3_hd = false;
+        i2c_consecutive_errors++;
         return;
     }
+
+    // Lettura valida: resetta contatore errori
+    if (i2c_consecutive_errors > 0)
+        i2c_consecutive_errors--;
 
     // Sanity check (range sonda O3: 0-10 ppm)
     if (ppm >= 0.0f && ppm <= 10.0f)
@@ -3522,6 +3645,7 @@ void read_so2_hd()
     if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
     {
         Serial.println("ERROR: SO2_HD - impossibile acquisire mutex I2C, skip lettura");
+        i2c_consecutive_errors++;
         return;
     }
     float ppm = so2_hd_sensor.readGasConcentrationPPM();
@@ -3532,8 +3656,13 @@ void read_so2_hd()
     {
         Serial.printf("ERROR: SO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
         so2_hd = false;
+        i2c_consecutive_errors++;
         return;
     }
+
+    // Lettura valida: resetta contatore errori
+    if (i2c_consecutive_errors > 0)
+        i2c_consecutive_errors--;
 
     // Validate readings (SO2 range 0-10 ppm)
     if (ppm >= 0 && ppm <= 10)
