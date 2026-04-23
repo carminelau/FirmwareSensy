@@ -474,6 +474,8 @@ bool i2c_scan_completed = false;
 // Contatore errori I2C consecutivi (incrementato da ogni read_*_hd che fallisce,
 // decrementato da letture riuscite). Quando supera I2C_ERROR_THRESHOLD viene
 // attivata la procedura di recovery immediata nel loop_monitoring.
+// Thread-safety: tutte le read_*_hd sono chiamate esclusivamente da loop_monitoring,
+// quindi accesso è single-task; volatile garantisce visibilità senza overhead atomico.
 static volatile int i2c_consecutive_errors = 0;
 static const int I2C_ERROR_THRESHOLD = 3; // soglia per recovery immediato
 
@@ -2694,8 +2696,10 @@ bool i2c_bus_recover_bitbang()
     Wire.end();
     vTaskDelay(pdMS_TO_TICKS(5));
 
-    // Configura SCL come output open-drain (HIGH = rilasciato) e SDA come input
-    pinMode(SCL_PIN, OUTPUT);
+    // Su ESP32, OUTPUT_OPEN_DRAIN è più sicuro in recovery: evita conflitti
+    // push-pull con sensori che tengono SCL/SDA basse. Il pull-up esterno
+    // gestisce il livello HIGH; il driver porta il pin LOW solo in modo attivo.
+    pinMode(SCL_PIN, OUTPUT_OPEN_DRAIN);
     digitalWrite(SCL_PIN, HIGH);
     pinMode(SDA_PIN, INPUT);
     delayMicroseconds(10);
@@ -2712,7 +2716,7 @@ bool i2c_bus_recover_bitbang()
     // Eroga fino a 9 impulsi SCL per completare il byte in transito nel sensore
     for (int i = 0; i < 9; i++)
     {
-        // SCL LOW → HIGH (impulso): periodo ~10µs a 100kHz
+        // SCL LOW → HIGH (impulso open-drain): periodo ~10µs a 100kHz
         digitalWrite(SCL_PIN, LOW);
         delayMicroseconds(5);
         digitalWrite(SCL_PIN, HIGH);
@@ -2726,8 +2730,8 @@ bool i2c_bus_recover_bitbang()
     }
 
     // Invia condizione di STOP: SCL=HIGH, poi SDA LOW→HIGH
-    // Prima assicura SDA bassa (per generare lo slave release)
-    pinMode(SDA_PIN, OUTPUT);
+    // Prima assicura SDA bassa (open-drain) per generare il fronte di rilascio
+    pinMode(SDA_PIN, OUTPUT_OPEN_DRAIN);
     digitalWrite(SDA_PIN, LOW);
     delayMicroseconds(5);
     digitalWrite(SCL_PIN, HIGH);
