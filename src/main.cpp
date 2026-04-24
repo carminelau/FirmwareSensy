@@ -1362,16 +1362,19 @@ void loop_0_core(void *pv)
         }
 
         // === WATCHDOG: Controlla che Core 1 non sia bloccato ===
+        // Usa il tempo trascorso dall'inizio del ciclo corrente (monitorStartMs), non la
+        // durata dell'ultimo ciclo completato (lastMonitorMs): se loop_monitoring si blocca
+        // a metà ciclo lastMonitorMs non viene mai aggiornato e il watchdog non scatterebbe.
         unsigned long now = millis();
         if (now - lastHealthCheck > HEALTH_CHECK_INTERVAL)
         {
-            unsigned long loopRuntime = debugTs.lastMonitorMs;
             unsigned long timeoutThreshold = low ? LOOP_TIMEOUT_LOW_POWER : LOOP_TIMEOUT_NORMAL;
+            unsigned long timeSinceStart = millis() - debugTs.monitorStartMs;
 
-            if (loopRuntime > timeoutThreshold)
+            if (timeSinceStart > timeoutThreshold)
             {
-                Serial.printf("WARNING: TIMEOUT DETECTED: loop_monitoring runtime=%lu ms (threshold=%lu ms)\n",
-                              loopRuntime, timeoutThreshold);
+                Serial.printf("WARNING: TIMEOUT DETECTED: loop_monitoring bloccato da %lu ms (threshold=%lu ms)\n",
+                              timeSinceStart, timeoutThreshold);
                 Serial.printf("WARNING: Low power mode: %s\n", low ? "ENABLED" : "DISABLED");
                 Serial.println("WARNING: Restarting device...");
                 vTaskDelay(pdMS_TO_TICKS(500));
@@ -3000,9 +3003,14 @@ bool init_o3_hd()
 
     o3_hd_sensor.setTempCompensation(o3_hd_sensor.OFF);
 
-    if (!o3_hd_sensor.changeAcquireMode(o3_hd_sensor.INITIATIVE))
+    // Usa PASSIVITY (lettura on-demand) come gli altri sensori HD.
+    // INITIATIVE fa sì che il sensore invii dati autonomamente; se il sensore smette
+    // di farlo (degradazione I2C a lungo termine), readGasConcentrationPPM() si blocca
+    // indefinitamente. In PASSIVITY il master richiede esplicitamente i dati: più
+    // prevedibile e con timeout Wire applicabile.
+    if (!o3_hd_sensor.changeAcquireMode(o3_hd_sensor.PASSIVITY))
     {
-        Serial.println("ERROR: O3_HD failed to set INITIATIVE mode");
+        Serial.println("ERROR: O3_HD failed to set PASSIVITY mode");
         return false;
     }
 
