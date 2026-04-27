@@ -479,6 +479,31 @@ bool i2c_scan_completed = false;
 static volatile int i2c_consecutive_errors = 0;
 static const int I2C_ERROR_THRESHOLD = 3; // soglia per recovery immediato
 
+static bool take_i2c_mutex(const char *operation, TickType_t timeoutTicks)
+{
+    if (i2cMutex == NULL)
+    {
+        return true;
+    }
+
+    if (xSemaphoreTake(i2cMutex, timeoutTicks) == pdTRUE)
+    {
+        return true;
+    }
+
+    Serial.printf("ERROR: [I2C] Timeout acquisizione mutex durante %s\n", operation);
+    i2c_consecutive_errors++;
+    return false;
+}
+
+static void give_i2c_mutex()
+{
+    if (i2cMutex != NULL)
+    {
+        xSemaphoreGive(i2cMutex);
+    }
+}
+
 // ============================================================================
 // SEZIONE 3: TASK E NOTIFICHE
 // ============================================================================
@@ -992,6 +1017,16 @@ void setup()
     Serial.printf("[MAC] %s\n", myConcatenation);
     vTaskDelay(pdMS_TO_TICKS(100));
 
+    // Crea mutex e configura Wire prima di qualsiasi periferica I2C/RTC.
+    i2cMutex = xSemaphoreCreateMutex();
+    if (i2cMutex == NULL)
+    {
+        Serial.println("CRITICAL: Fallimento creazione i2cMutex - operazioni I2C non sicure tra task!");
+    }
+
+    init_i2c();
+    scan_i2c_devices();
+
     Serial.println("[BOOT] Initializing RTC I2C...");
     init_rtc_i2c();
 
@@ -1128,14 +1163,6 @@ void setup()
     }
 
     Serial.println("[BOOT] Device configured - initializing services...");
-
-    // Crea mutex I2C prima dei task che usano il bus Wire
-    i2cMutex = xSemaphoreCreateMutex();
-    if (i2cMutex == NULL)
-    {
-        Serial.println("CRITICAL: Fallimento creazione i2cMutex - operazioni I2C non sicure tra task!");
-        // Il codice continua ma senza protezione: NULL check in ogni accesso I2C gestisce il caso
-    }
 
     BaseType_t watchdog_result = xTaskCreatePinnedToCore(
         loop_0_core,
@@ -1695,25 +1722,41 @@ void loop_monitoring(void *pvParameters)
 
             if (ozone)
             {
-                O3 = read_ozone();
+                if (take_i2c_mutex("read_ozone", pdMS_TO_TICKS(1500)))
+                {
+                    O3 = read_ozone();
+                    give_i2c_mutex();
+                }
                 i2c_bus_settle();
             }
 
             if (scd30)
             {
-                read_scd30();
+                if (take_i2c_mutex("read_scd30", pdMS_TO_TICKS(2500)))
+                {
+                    read_scd30();
+                    give_i2c_mutex();
+                }
                 i2c_bus_settle();
             }
 
             if (scd41)
             {
-                read_scd4x();
+                if (take_i2c_mutex("read_scd4x", pdMS_TO_TICKS(1500)))
+                {
+                    read_scd4x();
+                    give_i2c_mutex();
+                }
                 i2c_bus_settle();
             }
 
             if (gas)
             {
-                read_multigas();
+                if (take_i2c_mutex("read_multigas", pdMS_TO_TICKS(3000)))
+                {
+                    read_multigas();
+                    give_i2c_mutex();
+                }
                 i2c_bus_settle();
             }
 
@@ -1744,34 +1787,38 @@ void loop_monitoring(void *pvParameters)
             // Gestione catena sensori polveri
             if (sps)
             {
-                sps30_start_measurement();
-                vTaskDelay(pdMS_TO_TICKS(500));
-                if (!read_sps30(&pmAe1_0, &pmAe2_5, &pmAe10_0))
+                bool dustReadOk = false;
+                bool i2cDustReadAttempted = false;
+                if (take_i2c_mutex("read_sps30_sen55", pdMS_TO_TICKS(3000)))
                 {
-                    if (sen55)
+                    i2cDustReadAttempted = true;
+                    sps30_start_measurement();
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    dustReadOk = read_sps30(&pmAe1_0, &pmAe2_5, &pmAe10_0);
+                    if (!dustReadOk && sen55)
                     {
-                        if (!read_sen55())
-                        {
-                            if (pmsa003)
-                            {
-                                read_pmsA003();
-                            }
-                        }
+                        dustReadOk = read_sen55();
                     }
-                    else
-                    {
-                        if (pmsa003)
-                        {
-                            read_pmsA003();
-                        }
-                    }
+                    give_i2c_mutex();
+                }
+
+                if ((!i2cDustReadAttempted || !dustReadOk) && pmsa003)
+                {
+                    read_pmsA003();
                 }
             }
             else
             {
                 if (sen55)
                 {
-                    if (!read_sen55())
+                    bool sen55Ok = false;
+                    if (take_i2c_mutex("read_sen55", pdMS_TO_TICKS(2500)))
+                    {
+                        sen55Ok = read_sen55();
+                        give_i2c_mutex();
+                    }
+
+                    if (!sen55Ok)
                     {
                         if (pmsa003)
                         {
@@ -1820,7 +1867,12 @@ void loop_monitoring(void *pvParameters)
         // Il luxometer è a basso consumo, conviene leggerlo in ogni ciclo
         if (lux)
         {
-            float lux_val = lightMeter.readLightLevel();
+            float lux_val = -1.0f;
+            if (take_i2c_mutex("read_luxometer", pdMS_TO_TICKS(1000)))
+            {
+                lux_val = lightMeter.readLightLevel();
+                give_i2c_mutex();
+            }
             if (lux_val > 0 && lux_val < 100000.0)
             {
                 // Luxometer correttamente letto
@@ -1855,7 +1907,12 @@ void loop_monitoring(void *pvParameters)
         // Popola sensori nel JSON
         if (lux)
         {
-            float lux_val = lightMeter.readLightLevel();
+            float lux_val = -1.0f;
+            if (take_i2c_mutex("json_luxometer", pdMS_TO_TICKS(1000)))
+            {
+                lux_val = lightMeter.readLightLevel();
+                give_i2c_mutex();
+            }
             if (lux_val > 0)
             {
                 doc["luminosita"] = lux_val;
@@ -1888,8 +1945,14 @@ void loop_monitoring(void *pvParameters)
 
         if (sht)
         {
-            float temp = sht21.getTemperature();
-            float hum = sht21.getHumidity();
+            float temp = NAN;
+            float hum = NAN;
+            if (take_i2c_mutex("read_sht21", pdMS_TO_TICKS(1000)))
+            {
+                temp = sht21.getTemperature();
+                hum = sht21.getHumidity();
+                give_i2c_mutex();
+            }
             if (temp > -20 && temp < 100)
                 doc["temperatura"] = temp;
             if (hum > 10 && hum < 101)
@@ -2273,8 +2336,12 @@ void loop_monitoring(void *pvParameters)
 
                 if (sen55)
                 {
-                    sen5x.setFanAutoCleaningInterval(0);
-                    sen5x.stopMeasurement();
+                    if (take_i2c_mutex("sen55_stop_low_power", pdMS_TO_TICKS(1500)))
+                    {
+                        sen5x.setFanAutoCleaningInterval(0);
+                        sen5x.stopMeasurement();
+                        give_i2c_mutex();
+                    }
                 }
                 setCpuFrequencyMhz(10);
 
@@ -3407,7 +3474,7 @@ void refresh_i2c_runtime_sensors(bool forceReinit)
     so2_hd = sensorPresence.so2_hd_present ? init_so2_hd() : false;
     scd30 = sensorPresence.scd30_present ? init_scd30() : false;
     scd41 = sensorPresence.scd41_present ? init_scd4x() : false;
-    sen55 = init_sen55();
+    sen55 = sensorPresence.sps30_present ? init_sen55() : false;
     lux = sensorPresence.bh1750_present ? init_luxometer() : false;
 }
 
@@ -4918,6 +4985,11 @@ void init_rtc_i2c()
 
     // Tentativo di inizializzazione con timeout
     unsigned long beginStart = millis();
+    if (!take_i2c_mutex("init_rtc_i2c", pdMS_TO_TICKS(1500)))
+    {
+        return;
+    }
+
     bool rtcBeginSuccess = rtc_i2c.begin();
     unsigned long beginDuration = millis() - beginStart;
 
@@ -4925,19 +4997,23 @@ void init_rtc_i2c()
     if (millis() - rtcStartMs > RTC_MAX_TIMEOUT)
     {
         Serial.println("ERROR: ✗ RTC timeout globale (>1000ms) - SKIP");
+        give_i2c_mutex();
         return;
     }
 
     if (!rtcBeginSuccess)
     {
         Serial.printf("ERROR: ✗ RTC I2C begin() fallito (durata: %ldms) - device non risponde\n", beginDuration);
+        give_i2c_mutex();
         return;
     }
 
     // Controlla se il RTC è in esecuzione (DS1307 non ha lostPower come DS3231)
     // Usiamo !isrunning() per verificare se ha perso sincronizzazione
-    if (!rtc_i2c.isrunning())
+    bool rtcRunning = rtc_i2c.isrunning();
+    if (!rtcRunning)
     {
+        give_i2c_mutex();
         Serial.println("WARNING: ⚠️  RTC non è in esecuzione (batteria scarica?)");
         // Imposta il tempo da NTP
         unsigned long ntp_epoch = get_epoch_ntp_server();
@@ -4949,6 +5025,7 @@ void init_rtc_i2c()
     else
     {
         DateTime now = rtc_i2c.now();
+        give_i2c_mutex();
         Serial.printf("RTC current time: %04d-%02d-%02d %02d:%02d:%02d\n",
                       now.year(), now.month(), now.day(),
                       now.hour(), now.minute(), now.second());
@@ -4961,14 +5038,21 @@ void init_rtc_i2c()
  */
 void set_rtc_i2c_time(unsigned long epoch)
 {
+    if (!take_i2c_mutex("set_rtc_i2c_time", pdMS_TO_TICKS(1500)))
+    {
+        return;
+    }
+
     if (!rtc_i2c.begin())
     {
         Serial.println("ERROR: Errore: RTC non trovato");
+        give_i2c_mutex();
         return;
     }
 
     DateTime dt(epoch);
     rtc_i2c.adjust(dt);
+    give_i2c_mutex();
     Serial.printf("RTC time set: %04d-%02d-%02d %02d:%02d:%02d\n",
                   dt.year(), dt.month(), dt.day(),
                   dt.hour(), dt.minute(), dt.second());
@@ -4980,14 +5064,22 @@ void set_rtc_i2c_time(unsigned long epoch)
  */
 unsigned long get_rtc_i2c_time()
 {
+    if (!take_i2c_mutex("get_rtc_i2c_time", pdMS_TO_TICKS(1500)))
+    {
+        return 0;
+    }
+
     if (!rtc_i2c.begin())
     {
         Serial.println("ERROR: Errore: RTC non trovato");
+        give_i2c_mutex();
         return 0;
     }
 
     DateTime now = rtc_i2c.now();
-    return now.unixtime();
+    unsigned long epoch = now.unixtime();
+    give_i2c_mutex();
+    return epoch;
 }
 
 /**
@@ -5014,7 +5106,19 @@ void sync_rtc_i2c_with_ntp()
  */
 bool rtc_i2c_available()
 {
-    return rtc_i2c.begin();
+    if (!sensorPresence.rtc_present)
+    {
+        return false;
+    }
+
+    if (!take_i2c_mutex("rtc_i2c_available", pdMS_TO_TICKS(1000)))
+    {
+        return false;
+    }
+
+    bool available = rtc_i2c.begin();
+    give_i2c_mutex();
+    return available;
 }
 
 /**
@@ -5023,13 +5127,21 @@ bool rtc_i2c_available()
  */
 bool rtc_i2c_lost_power()
 {
+    if (!take_i2c_mutex("rtc_i2c_lost_power", pdMS_TO_TICKS(1000)))
+    {
+        return true;
+    }
+
     if (!rtc_i2c.begin())
     {
+        give_i2c_mutex();
         return true; // RTC non disponibile, assumiamo perdita di potenza
     }
     // DS1307 non ha lostPower() come DS3231
     // Usiamo !isrunning() per verificare se è sincronizzato
-    return !rtc_i2c.isrunning();
+    bool lostPower = !rtc_i2c.isrunning();
+    give_i2c_mutex();
+    return lostPower;
 }
 
 /**
@@ -5301,8 +5413,16 @@ String find_nearest_data()
  */
 bool find_arduino_devices()
 {
+    if (!take_i2c_mutex("find_arduino_devices", pdMS_TO_TICKS(1000)))
+    {
+        return false;
+    }
+
     Wire.beginTransmission(0x02);
-    if (Wire.endTransmission() == 0)
+    bool found = (Wire.endTransmission() == 0);
+    give_i2c_mutex();
+
+    if (found)
     {
 
         return true;
@@ -5343,36 +5463,52 @@ void check_sensors_diagnostics()
 
     esp_task_wdt_reset();
 
-    sps = init_sps30();
+    if (take_i2c_mutex("check_sensors_diagnostics_init_i2c_1", pdMS_TO_TICKS(15000)))
+    {
+        sps = init_sps30();
 
-    esp_task_wdt_reset();
+        esp_task_wdt_reset();
 
-    ozone = init_ozone();
+        ozone = init_ozone();
 
-    gas = init_multigas();
+        gas = init_multigas();
 
-    co_hd = init_co_hd();
-    no2_hd = init_no2_hd();
-    o3_hd = init_o3_hd();
-    so2_hd = init_so2_hd();
+        co_hd = init_co_hd();
+        no2_hd = init_no2_hd();
+        o3_hd = init_o3_hd();
+        so2_hd = init_so2_hd();
 
-    sht = sht21_init();
+        sht = sht21_init();
 
-    esp_task_wdt_reset();
+        esp_task_wdt_reset();
 
-    GPSsensor = init_gps();
+        GPSsensor = init_gps();
+        give_i2c_mutex();
+    }
+    else
+    {
+        sps = ozone = gas = co_hd = no2_hd = o3_hd = so2_hd = sht = GPSsensor = false;
+    }
 
     pmsa003 = init_pmsA003();
 
     esp_task_wdt_reset();
 
-    sen55 = init_sen55();
+    if (take_i2c_mutex("check_sensors_diagnostics_init_i2c_2", pdMS_TO_TICKS(10000)))
+    {
+        sen55 = sensorPresence.sps30_present ? init_sen55() : false;
 
-    scd30 = init_scd30();
+        scd30 = init_scd30();
 
-    esp_task_wdt_reset();
+        esp_task_wdt_reset();
 
-    scd41 = init_scd4x();
+        scd41 = init_scd4x();
+        give_i2c_mutex();
+    }
+    else
+    {
+        sen55 = scd30 = scd41 = false;
+    }
 
     sd = init_sd_card();
 
@@ -5388,7 +5524,15 @@ void check_sensors_diagnostics()
 
     soil = check_soil_moisture();
 
-    lux = init_luxometer();
+    if (take_i2c_mutex("check_sensors_diagnostics_lux", pdMS_TO_TICKS(2000)))
+    {
+        lux = init_luxometer();
+        give_i2c_mutex();
+    }
+    else
+    {
+        lux = false;
+    }
 
     esp_task_wdt_reset();
 
@@ -5417,7 +5561,7 @@ void check_sensors_diagnostics()
     checkSensor["SD"] = sd;
 
     // === RTC I2C DISPONIBILITA' in checkSensor ===
-    bool rtc_available = rtc_i2c.begin();
+    bool rtc_available = rtc_i2c_available();
     checkSensor["rtc_i2c"] = rtc_available;
 
     if (sd)
@@ -5436,9 +5580,17 @@ void check_sensors_diagnostics()
     // === RTC DETTAGLI in info ===
     if (rtc_available)
     {
-        DateTime now = rtc_i2c.now();
-        bool rtc_running = rtc_i2c.isrunning();
-        bool rtc_battery_ok = rtc_running;
+        DateTime now;
+        bool rtc_running = false;
+        bool rtc_battery_ok = false;
+
+        if (take_i2c_mutex("check_sensors_diagnostics_rtc", pdMS_TO_TICKS(1000)))
+        {
+            now = rtc_i2c.now();
+            rtc_running = rtc_i2c.isrunning();
+            rtc_battery_ok = rtc_running;
+            give_i2c_mutex();
+        }
 
         // Crea stringa data/ora formattata
         char rtc_datetime[20];
@@ -6203,10 +6355,16 @@ void send_sensors_diagnostics()
     // === DIAGNOSTICA RTC ===
     Serial.println("DIAGNOSTICA RTC I2C (DS1307):");
 
-    if (rtc_i2c.begin())
+    if (rtc_i2c_available())
     {
-        DateTime now = rtc_i2c.now();
-        bool running = rtc_i2c.isrunning();
+        DateTime now;
+        bool running = false;
+        if (take_i2c_mutex("send_sensors_diagnostics_rtc", pdMS_TO_TICKS(1000)))
+        {
+            now = rtc_i2c.now();
+            running = rtc_i2c.isrunning();
+            give_i2c_mutex();
+        }
         bool lost_power = !running;
 
         Serial.println("[DIAG] RTC Trovato: SI");
