@@ -479,6 +479,7 @@ bool i2c_scan_completed = false;
 static volatile int i2c_consecutive_errors = 0;
 static const int I2C_ERROR_THRESHOLD = 3; // soglia per recovery immediato
 static const uint32_t I2C_DEFAULT_TIMEOUT_MS = 250;
+static const uint32_t I2C_BUS_CLOCK_HZ = 50000;
 static const uint32_t I2C_HEALTH_LOCK_TIMEOUT_MS = 2000;
 static const uint32_t I2C_SLOW_OPERATION_MS = 1200;
 static const uint32_t I2C_STUCK_LOCK_RESTART_MS = 15000;
@@ -489,8 +490,38 @@ static const char *i2c_lock_operation = "none";
 static void i2c_configure_wire()
 {
     Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(100000);
+    Wire.setClock(I2C_BUS_CLOCK_HZ);
     Wire.setTimeOut(I2C_DEFAULT_TIMEOUT_MS);
+}
+
+static bool pause_wifi_for_data_extraction()
+{
+    if (AP || WiFi.getMode() == WIFI_OFF)
+    {
+        return false;
+    }
+
+    Serial.println("DEBUG: WiFi off durante estrazione dati sensori");
+    if (clientMQTT.connected())
+    {
+        clientMQTT.disconnect();
+    }
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    connected = false;
+    return true;
+}
+
+static void resume_wifi_after_data_extraction(bool wifiPaused, bool needWifi)
+{
+    if (!wifiPaused || !needWifi || AP)
+    {
+        return;
+    }
+
+    Serial.println("DEBUG: WiFi on dopo estrazione dati sensori");
+    WiFi.mode(WIFI_STA);
+    connect_wifi_network();
 }
 
 static void i2c_note_error(const char *operation)
@@ -1703,7 +1734,7 @@ void loop_monitoring(void *pvParameters)
         saveCounterSPIFFS = get_count_data_saved(SPIFFS);
 
         // Se troppi file salvati localmente, connettiti al WiFi per inviare
-        if ((saveCounterSD > 20 || saveCounterSPIFFS > 20) && conf)
+        if ((saveCounterSD > 20 || saveCounterSPIFFS > 20) && conf && (!low || isSendCycle))
         {
             connect_wifi_network();
             int status_wifi = WiFi.status();
@@ -1777,6 +1808,11 @@ void loop_monitoring(void *pvParameters)
         }
 
         // === LETTURA SENSORI ===
+        bool wifiPausedForExtraction = false;
+        if (conf && !AP)
+        {
+            wifiPausedForExtraction = pause_wifi_for_data_extraction();
+        }
 
         // Reset dati precedenti
         doc.clear();
@@ -2267,6 +2303,12 @@ void loop_monitoring(void *pvParameters)
         }
 
         String pollutantMissing = vector_to_encoded_json_array(PollutantsMissing);
+        bool forcedOffline = (low && isOfflineCycle); // In LOW POWER cicli 0-4: SEMPRE offline anche se connessi
+        bool needWifiAfterExtraction = conf && !forcedOffline;
+        if (wifiPausedForExtraction && needWifiAfterExtraction)
+        {
+            resume_wifi_after_data_extraction(wifiPausedForExtraction, true);
+        }
 
         // SKIP get_nearest_data SE CONNESSIONE LENTA O OFFLINE
         if (pollutantMissing != "[]" && WiFi.status() == WL_CONNECTED)
@@ -2312,7 +2354,6 @@ void loop_monitoring(void *pvParameters)
         // Normalemente: decidi in base alla connettività
 
         bool isOnline = (WiFi.status() == WL_CONNECTED) || AP;
-        bool forcedOffline = (low && isOfflineCycle); // In LOW POWER cicli 0-4: SEMPRE offline anche se connessi
 
         if (!isOnline || forcedOffline)
         {
