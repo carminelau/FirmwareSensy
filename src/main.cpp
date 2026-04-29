@@ -454,7 +454,7 @@ struct I2CSensorPresence
 {
     bool rtc_present = false;      // 0x68 - RTC DS1307
     bool gps_present = false;      // 0x42 - GPS MAX M10S
-    bool sps30_present = false;    // 0x69 - SPS30
+    bool sps30_present = false;    // 0x69 - SPS30/SEN55 (stesso indirizzo)
     bool ozone_present = false;    // 0x73 - Ozone
     bool multigas_present = false; // 0x08 - MultiGas
     bool co_hd_present = false;    // 0x74 - CO_HD
@@ -478,21 +478,59 @@ bool i2c_scan_completed = false;
 // quindi accesso è single-task; volatile garantisce visibilità senza overhead atomico.
 static volatile int i2c_consecutive_errors = 0;
 static const int I2C_ERROR_THRESHOLD = 3; // soglia per recovery immediato
+static const uint32_t I2C_DEFAULT_TIMEOUT_MS = 250;
+static const uint32_t I2C_HEALTH_LOCK_TIMEOUT_MS = 2000;
+static const uint32_t I2C_SLOW_OPERATION_MS = 1200;
+static const uint32_t I2C_STUCK_LOCK_RESTART_MS = 15000;
+static volatile bool i2c_lock_active = false;
+static volatile unsigned long i2c_lock_started_ms = 0;
+static const char *i2c_lock_operation = "none";
+
+static void i2c_configure_wire()
+{
+    Wire.begin(SDA_PIN, SCL_PIN);
+    Wire.setClock(100000);
+    Wire.setTimeOut(I2C_DEFAULT_TIMEOUT_MS);
+}
+
+static void i2c_note_error(const char *operation)
+{
+    i2c_consecutive_errors++;
+    Serial.printf("ERROR: [I2C] Errore in %s (consecutivi=%d)\n", operation, i2c_consecutive_errors);
+}
+
+static void i2c_note_success()
+{
+    if (i2c_consecutive_errors > 0)
+    {
+        i2c_consecutive_errors--;
+    }
+}
 
 static bool take_i2c_mutex(const char *operation, TickType_t timeoutTicks)
 {
     if (i2cMutex == NULL)
     {
-        return true;
+        Serial.printf("ERROR: [I2C] Mutex NULL durante %s\n", operation);
+        i2c_note_error(operation);
+        return false;
     }
 
     if (xSemaphoreTake(i2cMutex, timeoutTicks) == pdTRUE)
     {
+        i2c_lock_active = true;
+        i2c_lock_started_ms = millis();
+        i2c_lock_operation = operation;
         return true;
     }
 
-    Serial.printf("ERROR: [I2C] Timeout acquisizione mutex durante %s\n", operation);
-    i2c_consecutive_errors++;
+    unsigned long heldMs = i2c_lock_active ? (millis() - i2c_lock_started_ms) : 0;
+    Serial.printf("ERROR: [I2C] Timeout mutex durante %s. Ultima op=%s da %lu ms\n",
+                  operation, i2c_lock_operation, heldMs);
+    if (timeoutTicks >= pdMS_TO_TICKS(1000))
+    {
+        i2c_note_error(operation);
+    }
     return false;
 }
 
@@ -500,6 +538,14 @@ static void give_i2c_mutex()
 {
     if (i2cMutex != NULL)
     {
+        unsigned long heldMs = i2c_lock_active ? (millis() - i2c_lock_started_ms) : 0;
+        if (heldMs > I2C_SLOW_OPERATION_MS)
+        {
+            Serial.printf("WARNING: [I2C] Operazione lenta: %s durata %lu ms\n", i2c_lock_operation, heldMs);
+        }
+        i2c_lock_active = false;
+        i2c_lock_started_ms = 0;
+        i2c_lock_operation = "none";
         xSemaphoreGive(i2cMutex);
     }
 }
@@ -1395,6 +1441,19 @@ void loop_0_core(void *pv)
         unsigned long now = millis();
         if (now - lastHealthCheck > HEALTH_CHECK_INTERVAL)
         {
+            if (i2c_lock_active)
+            {
+                unsigned long i2cHeldMs = millis() - i2c_lock_started_ms;
+                if (i2cHeldMs > I2C_STUCK_LOCK_RESTART_MS)
+                {
+                    Serial.printf("ERROR: [I2C] Mutex bloccato da %lu ms in %s - riavvio controllato\n",
+                                  i2cHeldMs, i2c_lock_operation);
+                    Serial.flush();
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    ESP.restart();
+                }
+            }
+
             unsigned long timeoutThreshold = low ? LOOP_TIMEOUT_LOW_POWER : LOOP_TIMEOUT_NORMAL;
             unsigned long timeSinceStart = millis() - debugTs.monitorStartMs;
 
@@ -1540,8 +1599,20 @@ void loop_monitoring(void *pvParameters)
                 Serial.printf("WARNING: [I2C] Recovery anticipato (errori consecutivi: %d)\n", i2c_consecutive_errors);
 
             // Prendi il mutex per l'intera sequenza health-check + re-scan + reinit
-            if (i2cMutex != NULL)
-                xSemaphoreTake(i2cMutex, portMAX_DELAY);
+            bool healthLockTaken = take_i2c_mutex("i2c_health_check", pdMS_TO_TICKS(I2C_HEALTH_LOCK_TIMEOUT_MS));
+            if (!healthLockTaken)
+            {
+                unsigned long heldMs = i2c_lock_active ? (millis() - i2c_lock_started_ms) : 0;
+                if (heldMs > 10000)
+                {
+                    Serial.printf("ERROR: [I2C] Mutex bloccato da %lu ms in %s - riavvio controllato\n",
+                                  heldMs, i2c_lock_operation);
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    ESP.restart();
+                }
+                lastI2cHealthCheckMs = millis();
+                continue;
+            }
 
             bool busHealthy = check_i2c_bus_health();
             bool forceReinit = earlyRecovery; // Forza reinit se recovery anticipato
@@ -1550,14 +1621,22 @@ void loop_monitoring(void *pvParameters)
             {
                 Serial.println("WARNING: [I2C] Bus unhealthy, eseguo re-init I2C");
                 init_i2c();
+                busHealthy = check_i2c_bus_health();
+                if (!busHealthy)
+                {
+                    Serial.println("ERROR: [I2C] Bus ancora bloccato dopo recovery software - riavvio controllato");
+                    give_i2c_mutex();
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    ESP.restart();
+                    continue;
+                }
                 forceReinit = true;
             }
 
             refresh_i2c_runtime_sensors(forceReinit);
             i2c_consecutive_errors = 0; // Reset dopo health-check
 
-            if (i2cMutex != NULL)
-                xSemaphoreGive(i2cMutex);
+            give_i2c_mutex();
 
             lastI2cHealthCheckMs = millis();
         }
@@ -1734,7 +1813,14 @@ void loop_monitoring(void *pvParameters)
             {
                 if (take_i2c_mutex("read_scd30", pdMS_TO_TICKS(2500)))
                 {
-                    read_scd30();
+                    if (read_scd30())
+                    {
+                        i2c_note_success();
+                    }
+                    else
+                    {
+                        i2c_note_error("read_scd30");
+                    }
                     give_i2c_mutex();
                 }
                 i2c_bus_settle();
@@ -1744,7 +1830,14 @@ void loop_monitoring(void *pvParameters)
             {
                 if (take_i2c_mutex("read_scd4x", pdMS_TO_TICKS(1500)))
                 {
-                    read_scd4x();
+                    if (read_scd4x())
+                    {
+                        i2c_note_success();
+                    }
+                    else
+                    {
+                        i2c_note_error("read_scd4x");
+                    }
                     give_i2c_mutex();
                 }
                 i2c_bus_settle();
@@ -1799,6 +1892,14 @@ void loop_monitoring(void *pvParameters)
                     {
                         dustReadOk = read_sen55();
                     }
+                    if (dustReadOk)
+                    {
+                        i2c_note_success();
+                    }
+                    else
+                    {
+                        i2c_note_error("read_sps30_sen55");
+                    }
                     give_i2c_mutex();
                 }
 
@@ -1815,6 +1916,14 @@ void loop_monitoring(void *pvParameters)
                     if (take_i2c_mutex("read_sen55", pdMS_TO_TICKS(2500)))
                     {
                         sen55Ok = read_sen55();
+                        if (sen55Ok)
+                        {
+                            i2c_note_success();
+                        }
+                        else
+                        {
+                            i2c_note_error("read_sen55");
+                        }
                         give_i2c_mutex();
                     }
 
@@ -2013,8 +2122,8 @@ void loop_monitoring(void *pvParameters)
 
         if (o3_hd)
         {
-            // O3: µg/m³ = ppm * (MW/24.45)*1000  -> MW(O3)=48 => ~1963 a 25°C, 1 atm
-            const float O3_PPM_TO_UGM3 = 1963.0f;
+            // O3: conversione richiesta per sensori HD
+            const float O3_PPM_TO_UGM3 = 1.963f;
 
             float o3_hd_ug_m3 = o3_hd_ppm * O3_PPM_TO_UGM3;
 
@@ -2498,21 +2607,21 @@ void loop_1_core(void *pvParameters)
         {
             // Proteggi le letture GPS da race condition con loop_monitoring (stesso bus I2C).
             // Timeout breve (200ms): il GPS viene letto ogni ~1s, saltare un poll è accettabile.
-            if (i2cMutex != NULL && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE)
+            if (take_i2c_mutex("gps_position", pdMS_TO_TICKS(200)))
             {
-                latitude = (double)myGNSS.getLatitude() / 10000000;
-                longitude = (double)myGNSS.getLongitude() / 10000000;
-                SIV = myGNSS.getSIV();
-                xSemaphoreGive(i2cMutex);
+                latitude = (double)myGNSS.getLatitude(150) / 10000000;
+                longitude = (double)myGNSS.getLongitude(150) / 10000000;
+                SIV = myGNSS.getSIV(150);
+                give_i2c_mutex();
             }
 
             if (millis() > 5000)
             {
                 bool connected_gps = false;
-                if (i2cMutex != NULL && xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(200)) == pdTRUE)
+                if (take_i2c_mutex("gps_connected", pdMS_TO_TICKS(200)))
                 {
-                    connected_gps = myGNSS.isConnected();
-                    xSemaphoreGive(i2cMutex);
+                    connected_gps = myGNSS.isConnected(150);
+                    give_i2c_mutex();
                 }
                 if (!connected_gps)
                 {
@@ -2721,9 +2830,7 @@ void init_i2c()
     // Timeout corto per evitare lock-up prolungati su bus degradato
     Wire.end();
     vTaskDelay(pdMS_TO_TICKS(10));
-    Wire.begin(SDA_PIN, SCL_PIN);
-    Wire.setClock(100000); // 100kHz - velocità sicura per sensori multiple
-    Wire.setTimeOut(500);  // 500ms timeout - abbastanza per sensori lenti, evita hang prolungati
+    i2c_configure_wire();
 
     // Verifica che il bus I2C sia libero (non bloccato)
     Wire.beginTransmission(0x00);
@@ -2739,8 +2846,7 @@ void init_i2c()
         // Reset software del bus I2C
         Wire.end();
         vTaskDelay(pdMS_TO_TICKS(100));
-        Wire.begin(SDA_PIN, SCL_PIN);
-        Wire.setClock(100000);
+        i2c_configure_wire();
     }
 }
 
@@ -2749,7 +2855,7 @@ void init_i2c()
  *
  * Procedura:
  *   1. Legge lo stato di SDA: se è già HIGH il bus non è bloccato.
- *   2. Se SDA è LOW, eroga fino a 9 impulsi su SCL per sbloccare il byte
+ *   2. Se SDA/SCL è LOW, eroga fino a 18 impulsi su SCL per sbloccare il byte
  *      in transito nel sensore bloccato.
  *   3. Invia una condizione di STOP software (SCL=HIGH, poi SDA LOW→HIGH).
  *   4. Lascia SDA/SCL in stato INPUT (pull-up hardware) prima di richiamare
@@ -2774,17 +2880,19 @@ bool i2c_bus_recover_bitbang()
     pinMode(SDA_PIN, INPUT);
     delayMicroseconds(10);
 
-    if (digitalRead(SDA_PIN) == HIGH)
+    if (digitalRead(SDA_PIN) == HIGH && digitalRead(SCL_PIN) == HIGH)
     {
         // Bus libero: nessuna azione necessaria, riconfigurazione Wire delegata al chiamante
         pinMode(SCL_PIN, INPUT);
+        pinMode(SDA_PIN, INPUT);
         return true;
     }
 
-    Serial.println("WARNING: [I2C] SDA bloccata LOW - avvio clock-cycling recovery (NXP AN10216)");
+    Serial.printf("WARNING: [I2C] Bus bloccato (SDA=%d SCL=%d) - avvio clock-cycling recovery\n",
+                  digitalRead(SDA_PIN), digitalRead(SCL_PIN));
 
-    // Eroga fino a 9 impulsi SCL per completare il byte in transito nel sensore
-    for (int i = 0; i < 9; i++)
+    // Eroga fino a 18 impulsi SCL per completare eventuali byte in transito nel sensore
+    for (int i = 0; i < 18; i++)
     {
         // SCL LOW → HIGH (impulso open-drain): periodo ~10µs a 100kHz
         digitalWrite(SCL_PIN, LOW);
@@ -2792,7 +2900,7 @@ bool i2c_bus_recover_bitbang()
         digitalWrite(SCL_PIN, HIGH);
         delayMicroseconds(5);
 
-        if (digitalRead(SDA_PIN) == HIGH)
+        if (digitalRead(SDA_PIN) == HIGH && digitalRead(SCL_PIN) == HIGH)
         {
             Serial.printf("INFO: [I2C] SDA liberata dopo %d impulsi SCL\n", i + 1);
             break;
@@ -2814,16 +2922,17 @@ bool i2c_bus_recover_bitbang()
     pinMode(SDA_PIN, INPUT);
     delayMicroseconds(10);
 
-    bool sdaFree = (digitalRead(SDA_PIN) == HIGH);
-    if (sdaFree)
+    bool busFree = (digitalRead(SDA_PIN) == HIGH && digitalRead(SCL_PIN) == HIGH);
+    if (busFree)
     {
         Serial.println("INFO: [I2C] Bus liberato con successo tramite bit-bang recovery");
     }
     else
     {
-        Serial.println("ERROR: [I2C] SDA ancora bloccata dopo bit-bang recovery - necessario power cycle sensori");
+        Serial.printf("ERROR: [I2C] Bus ancora bloccato dopo recovery (SDA=%d SCL=%d) - serve power cycle sensori\n",
+                      digitalRead(SDA_PIN), digitalRead(SCL_PIN));
     }
-    return sdaFree;
+    return busFree;
 }
 
 /**
@@ -2834,6 +2943,17 @@ bool i2c_bus_recover_bitbang()
  */
 bool check_i2c_bus_health()
 {
+    int sdaLevel = digitalRead(SDA_PIN);
+    int sclLevel = digitalRead(SCL_PIN);
+    if (sdaLevel == LOW || sclLevel == LOW)
+    {
+        Serial.printf("ERROR: [I2C] Linea fisica bloccata prima del probe (SDA=%d SCL=%d)\n", sdaLevel, sclLevel);
+        bool recovered = i2c_bus_recover_bitbang();
+        vTaskDelay(pdMS_TO_TICKS(50));
+        i2c_configure_wire();
+        return recovered;
+    }
+
     // Probe veloce con indirizzo dummy: errore 2 (NACK) e 0 indicano bus vivo.
     Wire.beginTransmission(0x00);
     int result = Wire.endTransmission(true); // true = send STOP
@@ -2853,9 +2973,7 @@ bool check_i2c_bus_health()
 
         // Reinizializza il periferico I2C dopo il bit-bang
         vTaskDelay(pdMS_TO_TICKS(50));
-        Wire.begin(SDA_PIN, SCL_PIN);
-        Wire.setClock(100000);
-        Wire.setTimeOut(500);
+        i2c_configure_wire();
         vTaskDelay(pdMS_TO_TICKS(50));
 
         // Verifica finale
@@ -2958,32 +3076,21 @@ bool init_co_hd()
 
     if (error == 0)
     {
-        Serial.println("[DEBUG] init_co_hd() - Wire OK, calling begin()...");
-        if (co_hd_sensor.begin())
-        {
-            Serial.println("DEBUG: CO_HD begin() successful");
-            co_hd_sensor.setTempCompensation(co_hd_sensor.OFF);
-            Serial.println("[DEBUG] init_co_hd() - Temp compensation OFF");
+        Serial.println("[DEBUG] init_co_hd() - Wire OK, configuring sensor...");
+        co_hd_sensor.setTempCompensation(co_hd_sensor.OFF);
+        Serial.println("[DEBUG] init_co_hd() - Temp compensation OFF");
 
-            // Set to PASSIVITY mode to read data on demand
-            if (co_hd_sensor.changeAcquireMode(co_hd_sensor.PASSIVITY))
-            {
-                Serial.println("DEBUG: CO_HD set to PASSIVITY mode");
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                Serial.println("[DEBUG] init_co_hd() SUCCESSO!");
-                return true;
-            }
-            else
-            {
-                Serial.println("ERROR: CO_HD failed to set PASSIVITY mode");
-                return false;
-            }
-        }
-        else
+        // Set to PASSIVITY mode to read data on demand
+        if (co_hd_sensor.changeAcquireMode(co_hd_sensor.PASSIVITY))
         {
-            Serial.println("[ERROR] init_co_hd() - begin() FAILED");
-            return false;
+            Serial.println("DEBUG: CO_HD set to PASSIVITY mode");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            Serial.println("[DEBUG] init_co_hd() SUCCESSO!");
+            return true;
         }
+
+        Serial.println("ERROR: CO_HD failed to set PASSIVITY mode");
+        return false;
     }
     else
     {
@@ -3009,32 +3116,21 @@ bool init_no2_hd()
 
     if (error == 0)
     {
-        Serial.println("[DEBUG] init_no2_hd() - Wire OK, calling begin()...");
-        if (no2_hd_sensor.begin())
-        {
-            Serial.println("DEBUG: NO2_HD begin() successful");
-            no2_hd_sensor.setTempCompensation(no2_hd_sensor.OFF);
-            Serial.println("[DEBUG] init_no2_hd() - Temp compensation OFF");
+        Serial.println("[DEBUG] init_no2_hd() - Wire OK, configuring sensor...");
+        no2_hd_sensor.setTempCompensation(no2_hd_sensor.OFF);
+        Serial.println("[DEBUG] init_no2_hd() - Temp compensation OFF");
 
-            // Set to PASSIVITY mode to read data on demand
-            if (no2_hd_sensor.changeAcquireMode(no2_hd_sensor.PASSIVITY))
-            {
-                Serial.println("DEBUG: NO2_HD set to PASSIVITY mode");
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                Serial.println("[DEBUG] init_no2_hd() SUCCESSO!");
-                return true;
-            }
-            else
-            {
-                Serial.println("ERROR: NO2_HD failed to set PASSIVITY mode");
-                return false;
-            }
-        }
-        else
+        // Set to PASSIVITY mode to read data on demand
+        if (no2_hd_sensor.changeAcquireMode(no2_hd_sensor.PASSIVITY))
         {
-            Serial.println("[ERROR] init_no2_hd() - begin() FAILED");
-            return false;
+            Serial.println("DEBUG: NO2_HD set to PASSIVITY mode");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            Serial.println("[DEBUG] init_no2_hd() SUCCESSO!");
+            return true;
         }
+
+        Serial.println("ERROR: NO2_HD failed to set PASSIVITY mode");
+        return false;
     }
     else
     {
@@ -3059,12 +3155,6 @@ bool init_o3_hd()
     if (error != 0)
     {
         Serial.printf("[ERROR] init_o3_hd() - Wire transmission failed (%d)\n", error);
-        return false;
-    }
-
-    if (!o3_hd_sensor.begin())
-    {
-        Serial.println("[ERROR] init_o3_hd() - begin() FAILED");
         return false;
     }
 
@@ -3158,13 +3248,56 @@ bool init_pmsA003()
 
 bool init_sen55()
 {
+    if (!sensorPresence.sps30_present)
+    {
+        Serial.println("WARNING: ⊘ SEN55 @ 0x69 NON RILEVATO - SKIP");
+        return false;
+    }
+
     sen5x.begin(Wire);
-    uint16_t error = sen5x.deviceReset();
+    unsigned char productName[32] = {0};
+    uint16_t error = sen5x.getProductName(productName, sizeof(productName));
+    if (error)
+    {
+        Serial.println("WARNING: SEN55 non risponde come SEN5x");
+        return false;
+    }
+
+    Serial.printf("DEBUG: SEN55 product: %s\n", productName);
+
+    error = sen5x.deviceReset();
     if (error)
         return false;
     sen5x.setTemperatureOffsetSimple(0.0);
     error = sen5x.startMeasurement();
-    return (error == 0) && read_sen55();
+    return (error == 0);
+}
+
+void init_sensirion_pm_sensor()
+{
+    sps = false;
+    sen55 = false;
+
+    if (!sensorPresence.sps30_present)
+    {
+        Serial.println("WARNING: ⊘ Sensirion PM @ 0x69 NON RILEVATO - SKIP");
+        return;
+    }
+
+    Serial.println("[I2C] 0x69 rilevato: provo SEN55 prima di SPS30");
+    sen55 = init_sen55();
+    if (sen55)
+    {
+        Serial.println("[I2C] SEN55 attivo @ 0x69 - skip driver SPS30");
+        return;
+    }
+
+    Serial.println("[I2C] SEN55 non rilevato @ 0x69 - provo SPS30");
+    sps = init_sps30();
+    if (sps)
+    {
+        Serial.println("[I2C] SPS30 attivo @ 0x69");
+    }
 }
 
 bool init_scd30()
@@ -3223,7 +3356,7 @@ bool init_gps()
     // Inizializzazione oggetto myGNSS (timeout 3 secondi)
     // Nota: SparkFun_u-blox_GNSS usa Wire di default, indirizzo 0x42
     gpsTimeout = millis();
-    if (!myGNSS.begin(Wire, 0x42))
+    if (!myGNSS.begin(Wire, 0x42, 500))
     {
         Serial.println("ERROR: Fallimento myGNSS.begin(Wire, 0x42)");
         Serial.println("ERROR: Possibili cause:");
@@ -3240,7 +3373,7 @@ bool init_gps()
 
     // Configurazione output UBX (timeout 2 secondi)
     gpsTimeout = millis();
-    if (!myGNSS.setI2COutput(COM_TYPE_UBX))
+    if (!myGNSS.setI2COutput(COM_TYPE_UBX, 500))
     {
         Serial.println("WARNING: Avviso: setI2COutput(COM_TYPE_UBX) non riuscito");
     }
@@ -3250,7 +3383,7 @@ bool init_gps()
 
     // Salva configurazione in EEPROM GPS (timeout 2 secondi)
     gpsTimeout = millis();
-    if (!myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT))
+    if (!myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT, 500))
     {
         Serial.println("WARNING: Avviso: saveConfigSelective() non riuscito");
     }
@@ -3465,7 +3598,7 @@ void refresh_i2c_runtime_sensors(bool forceReinit)
     }
 
     Serial.println("[I2C] Re-initializing runtime I2C sensors...");
-    sps = sensorPresence.sps30_present ? init_sps30() : false;
+    init_sensirion_pm_sensor();
     ozone = sensorPresence.ozone_present ? init_ozone() : false;
     gas = sensorPresence.multigas_present ? init_multigas() : false;
     co_hd = sensorPresence.co_hd_present ? init_co_hd() : false;
@@ -3474,7 +3607,6 @@ void refresh_i2c_runtime_sensors(bool forceReinit)
     so2_hd = sensorPresence.so2_hd_present ? init_so2_hd() : false;
     scd30 = sensorPresence.scd30_present ? init_scd30() : false;
     scd41 = sensorPresence.scd41_present ? init_scd4x() : false;
-    sen55 = sensorPresence.sps30_present ? init_sen55() : false;
     lux = sensorPresence.bh1750_present ? init_luxometer() : false;
 }
 
@@ -3541,27 +3673,36 @@ void read_multigas()
 
 void read_co_hd()
 {
-    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    if (!take_i2c_mutex("read_co_hd", pdMS_TO_TICKS(1000)))
     {
-        Serial.println("ERROR: CO_HD - impossibile acquisire mutex I2C, skip lettura");
-        i2c_consecutive_errors++;
         return;
     }
+
+    Wire.beginTransmission(0x74);
+    int probe = Wire.endTransmission(true);
+    if (probe != 0)
+    {
+        give_i2c_mutex();
+        Serial.printf("ERROR: CO_HD probe fallito (Wire=%d) - disabilito fino al prossimo scan\n", probe);
+        co_hd = false;
+        i2c_note_error("read_co_hd_probe");
+        return;
+    }
+
     float ppm = co_hd_sensor.readGasConcentrationPPM();
-    xSemaphoreGive(i2cMutex);
+    give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
     if (ppm < 0)
     {
         Serial.printf("ERROR: CO_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
         co_hd = false;
-        i2c_consecutive_errors++;
+        i2c_note_error("read_co_hd");
         return;
     }
 
     // Lettura valida: resetta contatore errori
-    if (i2c_consecutive_errors > 0)
-        i2c_consecutive_errors--;
+    i2c_note_success();
 
     // Validate readings (CO range 0-1000 ppm)
     if (ppm >= 0 && ppm <= 1000)
@@ -3583,27 +3724,36 @@ void read_co_hd()
 
 void read_no2_hd()
 {
-    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    if (!take_i2c_mutex("read_no2_hd", pdMS_TO_TICKS(1000)))
     {
-        Serial.println("ERROR: NO2_HD - impossibile acquisire mutex I2C, skip lettura");
-        i2c_consecutive_errors++;
         return;
     }
+
+    Wire.beginTransmission(0x76);
+    int probe = Wire.endTransmission(true);
+    if (probe != 0)
+    {
+        give_i2c_mutex();
+        Serial.printf("ERROR: NO2_HD probe fallito (Wire=%d) - disabilito fino al prossimo scan\n", probe);
+        no2_hd = false;
+        i2c_note_error("read_no2_hd_probe");
+        return;
+    }
+
     float ppm = no2_hd_sensor.readGasConcentrationPPM();
-    xSemaphoreGive(i2cMutex);
+    give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
     if (ppm < 0)
     {
         Serial.printf("ERROR: NO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
         no2_hd = false;
-        i2c_consecutive_errors++;
+        i2c_note_error("read_no2_hd");
         return;
     }
 
     // Lettura valida: resetta contatore errori
-    if (i2c_consecutive_errors > 0)
-        i2c_consecutive_errors--;
+    i2c_note_success();
 
     // Validate readings (NO2 range 0-20 ppm)
     if (ppm >= 0 && ppm <= 20)
@@ -3625,39 +3775,45 @@ void read_no2_hd()
 
 void read_o3_hd()
 {
-    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    if (!take_i2c_mutex("read_o3_hd", pdMS_TO_TICKS(1000)))
     {
-        Serial.println("ERROR: O3_HD - impossibile acquisire mutex I2C, skip lettura");
-        i2c_consecutive_errors++;
         return;
     }
+
+    Wire.beginTransmission(0x75);
+    int probe = Wire.endTransmission(true);
+    if (probe != 0)
+    {
+        give_i2c_mutex();
+        Serial.printf("ERROR: O3_HD probe fallito (Wire=%d) - disabilito fino al prossimo scan\n", probe);
+        o3_hd = false;
+        i2c_note_error("read_o3_hd_probe");
+        return;
+    }
+
     // Lettura factory-calibrated (I2C/UART), valore atteso in ppm per O3
     float ppm = o3_hd_sensor.readGasConcentrationPPM();
-    xSemaphoreGive(i2cMutex);
+    give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
     if (ppm < 0)
     {
         Serial.printf("ERROR: O3_HD errore I2C (ppm=%.4f) - disabilito sensore fino al prossimo scan\n", ppm);
         o3_hd = false;
-        i2c_consecutive_errors++;
+        i2c_note_error("read_o3_hd");
         return;
     }
 
     // Lettura valida: resetta contatore errori
-    if (i2c_consecutive_errors > 0)
-        i2c_consecutive_errors--;
+    i2c_note_success();
 
     // Sanity check (range sonda O3: 0-10 ppm)
     if (ppm >= 0.0f && ppm <= 10.0f)
     {
         o3_hd_ppm = ppm;
 
-        // ppm -> µg/m³ (25°C, 1 atm): µg/m³ = ppm * (MW/24.45) * 1000
-        const float MW_O3_G_MOL = 48.00f;
-        const float MOLAR_VOLUME_25C_L_MOL = 24.45f;
-
-        const float O3_PPM_TO_UGM3_25C_1ATM = (MW_O3_G_MOL / MOLAR_VOLUME_25C_L_MOL) * 1000.0f; // ~1963.19
+        // O3: conversione richiesta per sensori HD
+        const float O3_PPM_TO_UGM3_25C_1ATM = 1.963f;
         float o3_hd_ug_m3 = o3_hd_ppm * O3_PPM_TO_UGM3_25C_1ATM;
 
         Serial.printf("DEBUG: O3_HD - ppm: %.4f | ug/m3: %.2f\n", o3_hd_ppm, o3_hd_ug_m3);
@@ -3685,32 +3841,21 @@ bool init_so2_hd()
 
     if (error == 0)
     {
-        Serial.println("[DEBUG] init_so2_hd() - Wire OK, calling begin()...");
-        if (so2_hd_sensor.begin())
-        {
-            Serial.println("DEBUG: SO2_HD begin() successful");
-            so2_hd_sensor.setTempCompensation(so2_hd_sensor.OFF);
-            Serial.println("[DEBUG] init_so2_hd() - Temp compensation OFF");
+        Serial.println("[DEBUG] init_so2_hd() - Wire OK, configuring sensor...");
+        so2_hd_sensor.setTempCompensation(so2_hd_sensor.OFF);
+        Serial.println("[DEBUG] init_so2_hd() - Temp compensation OFF");
 
-            // Set to PASSIVITY mode to read data on demand
-            if (so2_hd_sensor.changeAcquireMode(so2_hd_sensor.PASSIVITY))
-            {
-                Serial.println("DEBUG: SO2_HD set to PASSIVITY mode");
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                Serial.println("[DEBUG] init_so2_hd() SUCCESSO!");
-                return true;
-            }
-            else
-            {
-                Serial.println("ERROR: SO2_HD failed to set PASSIVITY mode");
-                return false;
-            }
-        }
-        else
+        // Set to PASSIVITY mode to read data on demand
+        if (so2_hd_sensor.changeAcquireMode(so2_hd_sensor.PASSIVITY))
         {
-            Serial.println("[ERROR] init_so2_hd() - begin() FAILED");
-            return false;
+            Serial.println("DEBUG: SO2_HD set to PASSIVITY mode");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            Serial.println("[DEBUG] init_so2_hd() SUCCESSO!");
+            return true;
         }
+
+        Serial.println("ERROR: SO2_HD failed to set PASSIVITY mode");
+        return false;
     }
     else
     {
@@ -3721,27 +3866,36 @@ bool init_so2_hd()
 
 void read_so2_hd()
 {
-    if (i2cMutex == NULL || xSemaphoreTake(i2cMutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+    if (!take_i2c_mutex("read_so2_hd", pdMS_TO_TICKS(1000)))
     {
-        Serial.println("ERROR: SO2_HD - impossibile acquisire mutex I2C, skip lettura");
-        i2c_consecutive_errors++;
         return;
     }
+
+    Wire.beginTransmission(0x77);
+    int probe = Wire.endTransmission(true);
+    if (probe != 0)
+    {
+        give_i2c_mutex();
+        Serial.printf("ERROR: SO2_HD probe fallito (Wire=%d) - disabilito fino al prossimo scan\n", probe);
+        so2_hd = false;
+        i2c_note_error("read_so2_hd_probe");
+        return;
+    }
+
     float ppm = so2_hd_sensor.readGasConcentrationPPM();
-    xSemaphoreGive(i2cMutex);
+    give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
     if (ppm < 0)
     {
         Serial.printf("ERROR: SO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
         so2_hd = false;
-        i2c_consecutive_errors++;
+        i2c_note_error("read_so2_hd");
         return;
     }
 
     // Lettura valida: resetta contatore errori
-    if (i2c_consecutive_errors > 0)
-        i2c_consecutive_errors--;
+    i2c_note_success();
 
     // Validate readings (SO2 range 0-10 ppm)
     if (ppm >= 0 && ppm <= 10)
@@ -3764,14 +3918,20 @@ void read_so2_hd()
 bool read_sps30(float *pm1, float *pm2, float *pm10)
 {
     int16_t ret;
-    uint16_t data_ready;
+    uint16_t data_ready = 0;
     struct sps30_measurement sps30_data;
 
-    for (int retry = 0; retry < 20; retry++)
+    for (int retry = 0; retry < 5; retry++)
     {
         if (sps30_read_data_ready(&data_ready) >= 0 && data_ready)
             break;
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (!data_ready)
+    {
+        Serial.println("WARNING: SPS30 dati non pronti entro 500ms");
+        return false;
     }
 
     ret = sps30_read_measurement(&sps30_data);
@@ -3799,7 +3959,21 @@ bool read_sen55()
 {
     uint16_t error;
     char errorMessage[256];
-    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    bool dataReady = false;
+    error = sen5x.readDataReady(dataReady);
+    if (error)
+    {
+        errorToString(error, errorMessage, 256);
+        Serial.printf("ERROR: SEN55 data-ready: %s\n", errorMessage);
+        return false;
+    }
+
+    if (!dataReady)
+    {
+        Serial.println("WARNING: SEN55 dati non pronti - uso ultimo valore valido");
+        return true;
+    }
 
     float massConcentrationPm4p0;
     error = sen5x.readMeasuredValues(pmAe1_0, pmAe2_5, massConcentrationPm4p0,
@@ -3820,7 +3994,21 @@ bool read_sen55()
 
 bool read_scd30()
 {
-    int16_t error = scd3x.blockingReadMeasurementData(scd30_co2, scd30_temp, scd30_hum);
+    uint16_t dataReady = 0;
+    int16_t error = scd3x.getDataReady(dataReady);
+    if (error != 0)
+    {
+        Serial.println("ERROR: SCD30 Errore data-ready");
+        return false;
+    }
+
+    if (dataReady == 0)
+    {
+        Serial.println("WARNING: SCD30 dati non pronti - uso ultimo valore valido");
+        return true;
+    }
+
+    error = scd3x.readMeasurementData(scd30_co2, scd30_temp, scd30_hum);
     if (error != 0)
     {
         Serial.println("ERROR: SCD30 Errore");
@@ -3837,8 +4025,13 @@ bool read_scd4x()
     vTaskDelay(pdMS_TO_TICKS(100));
 
     bool isDataReady = false;
-    if (scd4x.getDataReadyStatus(isDataReady) != 0 || !isDataReady)
+    if (scd4x.getDataReadyStatus(isDataReady) != 0)
         return false;
+    if (!isDataReady)
+    {
+        Serial.println("WARNING: SCD41 dati non pronti - uso ultimo valore valido");
+        return true;
+    }
 
     error = scd4x.readMeasurement(scd41_co2, scd41_temp, scd41_hum);
     if (error || scd41_co2 == 0)
@@ -5465,7 +5658,7 @@ void check_sensors_diagnostics()
 
     if (take_i2c_mutex("check_sensors_diagnostics_init_i2c_1", pdMS_TO_TICKS(15000)))
     {
-        sps = init_sps30();
+        init_sensirion_pm_sensor();
 
         esp_task_wdt_reset();
 
@@ -5487,7 +5680,7 @@ void check_sensors_diagnostics()
     }
     else
     {
-        sps = ozone = gas = co_hd = no2_hd = o3_hd = so2_hd = sht = GPSsensor = false;
+        sps = sen55 = ozone = gas = co_hd = no2_hd = o3_hd = so2_hd = sht = GPSsensor = false;
     }
 
     pmsa003 = init_pmsA003();
@@ -5496,8 +5689,6 @@ void check_sensors_diagnostics()
 
     if (take_i2c_mutex("check_sensors_diagnostics_init_i2c_2", pdMS_TO_TICKS(10000)))
     {
-        sen55 = sensorPresence.sps30_present ? init_sen55() : false;
-
         scd30 = init_scd30();
 
         esp_task_wdt_reset();
@@ -5507,7 +5698,7 @@ void check_sensors_diagnostics()
     }
     else
     {
-        sen55 = scd30 = scd41 = false;
+        scd30 = scd41 = false;
     }
 
     sd = init_sd_card();
