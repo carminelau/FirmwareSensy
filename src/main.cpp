@@ -478,20 +478,46 @@ bool i2c_scan_completed = false;
 // quindi accesso è single-task; volatile garantisce visibilità senza overhead atomico.
 static volatile int i2c_consecutive_errors = 0;
 static const int I2C_ERROR_THRESHOLD = 3; // soglia per recovery immediato
-static const uint32_t I2C_DEFAULT_TIMEOUT_MS = 250;
+static const uint32_t I2C_DEFAULT_TIMEOUT_MS = 120;
 static const uint32_t I2C_BUS_CLOCK_HZ = 50000;
 static const uint32_t I2C_HEALTH_LOCK_TIMEOUT_MS = 2000;
-static const uint32_t I2C_SLOW_OPERATION_MS = 1200;
+static const uint32_t I2C_SLOW_OPERATION_MS = 800;
 static const uint32_t I2C_STUCK_LOCK_RESTART_MS = 15000;
 static volatile bool i2c_lock_active = false;
 static volatile unsigned long i2c_lock_started_ms = 0;
 static const char *i2c_lock_operation = "none";
+
+static void i2c_note_error(const char *operation);
 
 static void i2c_configure_wire()
 {
     Wire.begin(SDA_PIN, SCL_PIN);
     Wire.setClock(I2C_BUS_CLOCK_HZ);
     Wire.setTimeOut(I2C_DEFAULT_TIMEOUT_MS);
+}
+
+static bool i2c_lines_free()
+{
+    return digitalRead(SDA_PIN) == HIGH && digitalRead(SCL_PIN) == HIGH;
+}
+
+static bool i2c_recover_if_lines_stuck(const char *operation)
+{
+    if (i2c_lines_free())
+    {
+        return true;
+    }
+
+    Serial.printf("WARNING: [I2C] Linee bloccate prima di %s - recovery\n", operation);
+    bool recovered = i2c_bus_recover_bitbang();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    i2c_configure_wire();
+    if (!recovered || !i2c_lines_free())
+    {
+        i2c_note_error(operation);
+        return false;
+    }
+    return true;
 }
 
 static bool pause_wifi_for_data_extraction()
@@ -552,6 +578,14 @@ static bool take_i2c_mutex(const char *operation, TickType_t timeoutTicks)
         i2c_lock_active = true;
         i2c_lock_started_ms = millis();
         i2c_lock_operation = operation;
+        if (!i2c_recover_if_lines_stuck(operation))
+        {
+            i2c_lock_active = false;
+            i2c_lock_started_ms = 0;
+            i2c_lock_operation = "none";
+            xSemaphoreGive(i2cMutex);
+            return false;
+        }
         return true;
     }
 
@@ -3100,6 +3134,117 @@ bool init_multigas()
     }
     return false;
 }
+
+static uint8_t dfrobot_checksum(const uint8_t *data, uint8_t len)
+{
+    uint8_t sum = 0;
+    data++;
+    for (uint8_t i = 0; i < (len - 2); i++)
+    {
+        sum += *data++;
+    }
+    return (uint8_t)((~sum) + 1);
+}
+
+static void dfrobot_pack_command(uint8_t command, uint8_t arg, uint8_t *frame)
+{
+    memset(frame, 0, 9);
+    frame[0] = 0xff;
+    frame[1] = 0x01;
+    frame[2] = command;
+    frame[3] = arg;
+    frame[8] = dfrobot_checksum(frame, 8);
+}
+
+static bool dfrobot_write_frame(uint8_t address, const uint8_t *frame)
+{
+    if (!i2c_recover_if_lines_stuck("dfrobot_write"))
+    {
+        return false;
+    }
+
+    Wire.beginTransmission(address);
+    Wire.write((uint8_t)0);
+    Wire.write(frame, 9);
+    return Wire.endTransmission(true) == 0;
+}
+
+static bool dfrobot_read_frame(uint8_t address, uint8_t *response, uint32_t timeoutMs = 80)
+{
+    memset(response, 0, 9);
+    Wire.beginTransmission(address);
+    Wire.write((uint8_t)0);
+    if (Wire.endTransmission(true) != 0)
+    {
+        return false;
+    }
+
+    uint8_t requested = Wire.requestFrom(address, (uint8_t)9, (uint8_t)true);
+    uint32_t start = millis();
+    uint8_t index = 0;
+    while (index < 9 && (millis() - start) < timeoutMs)
+    {
+        while (Wire.available() && index < 9)
+        {
+            response[index++] = Wire.read();
+        }
+        if (index < 9)
+        {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+
+    if (requested != 9 || index != 9)
+    {
+        Serial.printf("ERROR: [I2C] DFRobot risposta corta @0x%02X (%u/%u byte)\n", address, index, requested);
+        return false;
+    }
+
+    return response[8] == dfrobot_checksum(response, 8);
+}
+
+static bool dfrobot_change_acquire_mode_safe(uint8_t address, uint8_t mode)
+{
+    uint8_t frame[9];
+    uint8_t response[9];
+    dfrobot_pack_command(CMD_CHANGE_GET_METHOD, mode, frame);
+    if (!dfrobot_write_frame(address, frame))
+    {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+    return dfrobot_read_frame(address, response) && response[2] == 1;
+}
+
+static bool dfrobot_read_ppm_safe(uint8_t address, float *ppm)
+{
+    uint8_t frame[9];
+    uint8_t response[9];
+    dfrobot_pack_command(CMD_GET_GAS_CONCENTRATION, 0, frame);
+    if (!dfrobot_write_frame(address, frame))
+    {
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+    if (!dfrobot_read_frame(address, response))
+    {
+        return false;
+    }
+
+    float value = ((response[2] << 8) + response[3]) * 1.0f;
+    if (response[5] == 1)
+    {
+        value *= 0.1f;
+    }
+    else if (response[5] == 2)
+    {
+        value *= 0.01f;
+    }
+
+    *ppm = value;
+    return true;
+}
+
 bool init_co_hd()
 {
     Serial.println("[DEBUG] init_co_hd() START");
@@ -3118,14 +3263,10 @@ bool init_co_hd()
     if (error == 0)
     {
         Serial.println("[DEBUG] init_co_hd() - Wire OK, configuring sensor...");
-        co_hd_sensor.setTempCompensation(co_hd_sensor.OFF);
-        Serial.println("[DEBUG] init_co_hd() - Temp compensation OFF");
-
-        // Set to PASSIVITY mode to read data on demand
-        if (co_hd_sensor.changeAcquireMode(co_hd_sensor.PASSIVITY))
+        if (dfrobot_change_acquire_mode_safe(0x74, DFRobot_GAS::PASSIVITY))
         {
             Serial.println("DEBUG: CO_HD set to PASSIVITY mode");
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(300));
             Serial.println("[DEBUG] init_co_hd() SUCCESSO!");
             return true;
         }
@@ -3158,14 +3299,10 @@ bool init_no2_hd()
     if (error == 0)
     {
         Serial.println("[DEBUG] init_no2_hd() - Wire OK, configuring sensor...");
-        no2_hd_sensor.setTempCompensation(no2_hd_sensor.OFF);
-        Serial.println("[DEBUG] init_no2_hd() - Temp compensation OFF");
-
-        // Set to PASSIVITY mode to read data on demand
-        if (no2_hd_sensor.changeAcquireMode(no2_hd_sensor.PASSIVITY))
+        if (dfrobot_change_acquire_mode_safe(0x76, DFRobot_GAS::PASSIVITY))
         {
             Serial.println("DEBUG: NO2_HD set to PASSIVITY mode");
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(300));
             Serial.println("[DEBUG] init_no2_hd() SUCCESSO!");
             return true;
         }
@@ -3199,14 +3336,12 @@ bool init_o3_hd()
         return false;
     }
 
-    o3_hd_sensor.setTempCompensation(o3_hd_sensor.OFF);
-
     // Usa PASSIVITY (lettura on-demand) come gli altri sensori HD.
     // INITIATIVE fa sì che il sensore invii dati autonomamente; se il sensore smette
     // di farlo (degradazione I2C a lungo termine), readGasConcentrationPPM() si blocca
     // indefinitamente. In PASSIVITY il master richiede esplicitamente i dati: più
     // prevedibile e con timeout Wire applicabile.
-    if (!o3_hd_sensor.changeAcquireMode(o3_hd_sensor.PASSIVITY))
+    if (!dfrobot_change_acquire_mode_safe(0x75, DFRobot_GAS::PASSIVITY))
     {
         Serial.println("ERROR: O3_HD failed to set PASSIVITY mode");
         return false;
@@ -3215,9 +3350,9 @@ bool init_o3_hd()
     // Nota: da wiki, dopo cambio modalità può servire spegnere/riaccendere.[^...]
     vTaskDelay(pdMS_TO_TICKS(300));
 
-    // prima lettura "di scarto"
-    (void)o3_hd_sensor.readGasConcentrationPPM();
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    float discardPpm = 0.0f;
+    (void)dfrobot_read_ppm_safe(0x75, &discardPpm);
+    vTaskDelay(pdMS_TO_TICKS(300));
 
     Serial.println("[DEBUG] init_o3_hd() SUCCESSO!");
     return true;
@@ -3543,13 +3678,21 @@ void scan_i2c_devices()
 
             nDevices++;
         }
-        else if (error == 4)
+        else if (error == 4 || error == 5)
         {
             // Errore sconosciuto - potrebbe indicare clock stuck
             errorCount++;
-            if (address % 10 == 0)
+            if (errorCount <= 3 || address % 10 == 0)
             { // Log ogni 10 indirizzi per ridurre spam
-                Serial.printf("WARNING: ✗ Errore @ 0x%02X (possibile clock stuck)\n", address);
+                Serial.printf("WARNING: ✗ Errore @ 0x%02X Wire=%d (possibile clock stuck)\n", address, error);
+            }
+            if (errorCount >= 3)
+            {
+                Serial.println("WARNING: [I2C] Troppi errori in scan - recovery e stop scan");
+                i2c_bus_recover_bitbang();
+                vTaskDelay(pdMS_TO_TICKS(20));
+                i2c_configure_wire();
+                break;
             }
         }
 
@@ -3730,13 +3873,14 @@ void read_co_hd()
         return;
     }
 
-    float ppm = co_hd_sensor.readGasConcentrationPPM();
+    float ppm = 0.0f;
+    bool readOk = dfrobot_read_ppm_safe(0x74, &ppm);
     give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
-    if (ppm < 0)
+    if (!readOk)
     {
-        Serial.printf("ERROR: CO_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
+        Serial.println("ERROR: CO_HD errore I2C - disabilito sensore fino al prossimo scan");
         co_hd = false;
         i2c_note_error("read_co_hd");
         return;
@@ -3781,13 +3925,14 @@ void read_no2_hd()
         return;
     }
 
-    float ppm = no2_hd_sensor.readGasConcentrationPPM();
+    float ppm = 0.0f;
+    bool readOk = dfrobot_read_ppm_safe(0x76, &ppm);
     give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
-    if (ppm < 0)
+    if (!readOk)
     {
-        Serial.printf("ERROR: NO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
+        Serial.println("ERROR: NO2_HD errore I2C - disabilito sensore fino al prossimo scan");
         no2_hd = false;
         i2c_note_error("read_no2_hd");
         return;
@@ -3832,14 +3977,14 @@ void read_o3_hd()
         return;
     }
 
-    // Lettura factory-calibrated (I2C/UART), valore atteso in ppm per O3
-    float ppm = o3_hd_sensor.readGasConcentrationPPM();
+    float ppm = 0.0f;
+    bool readOk = dfrobot_read_ppm_safe(0x75, &ppm);
     give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
-    if (ppm < 0)
+    if (!readOk)
     {
-        Serial.printf("ERROR: O3_HD errore I2C (ppm=%.4f) - disabilito sensore fino al prossimo scan\n", ppm);
+        Serial.println("ERROR: O3_HD errore I2C - disabilito sensore fino al prossimo scan");
         o3_hd = false;
         i2c_note_error("read_o3_hd");
         return;
@@ -3883,14 +4028,10 @@ bool init_so2_hd()
     if (error == 0)
     {
         Serial.println("[DEBUG] init_so2_hd() - Wire OK, configuring sensor...");
-        so2_hd_sensor.setTempCompensation(so2_hd_sensor.OFF);
-        Serial.println("[DEBUG] init_so2_hd() - Temp compensation OFF");
-
-        // Set to PASSIVITY mode to read data on demand
-        if (so2_hd_sensor.changeAcquireMode(so2_hd_sensor.PASSIVITY))
+        if (dfrobot_change_acquire_mode_safe(0x77, DFRobot_GAS::PASSIVITY))
         {
             Serial.println("DEBUG: SO2_HD set to PASSIVITY mode");
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(300));
             Serial.println("[DEBUG] init_so2_hd() SUCCESSO!");
             return true;
         }
@@ -3923,13 +4064,14 @@ void read_so2_hd()
         return;
     }
 
-    float ppm = so2_hd_sensor.readGasConcentrationPPM();
+    float ppm = 0.0f;
+    bool readOk = dfrobot_read_ppm_safe(0x77, &ppm);
     give_i2c_mutex();
 
     // ppm < 0 indica errore I2C dalla libreria DFRobot_GAS
-    if (ppm < 0)
+    if (!readOk)
     {
-        Serial.printf("ERROR: SO2_HD errore I2C (ppm=%.2f) - disabilito sensore fino al prossimo scan\n", ppm);
+        Serial.println("ERROR: SO2_HD errore I2C - disabilito sensore fino al prossimo scan");
         so2_hd = false;
         i2c_note_error("read_so2_hd");
         return;
