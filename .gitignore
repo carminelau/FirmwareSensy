@@ -8,3 +8,4 @@
 .platformio/platforms/*
 .platformio/packages.lock
 main_old.cpp
+ports/*
