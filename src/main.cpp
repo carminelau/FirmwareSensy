@@ -1839,6 +1839,7 @@ void loop_monitoring(void *pvParameters)
                     updateFromFile(updateBin, binFilePath.c_str());
                 }
             }
+            send_sensors_diagnostics();
         }
 
         // === LETTURA SENSORI ===
@@ -1915,7 +1916,7 @@ void loop_monitoring(void *pvParameters)
 
             if (gas)
             {
-                if (take_i2c_mutex("read_multigas", pdMS_TO_TICKS(3000)))
+                if (take_i2c_mutex("read_multigas", pdMS_TO_TICKS(300))) //(3000) //Rami - 09 07 26
                 {
                     read_multigas();
                     give_i2c_mutex();
@@ -2158,16 +2159,28 @@ void loop_monitoring(void *pvParameters)
                 doc["co2"] = scd41_co2;
         }
 
-        if (gas)
+        // if (gas)
+        // {
+        //     if (no2 > 0 && no2 < 1000)
+        //         doc["no2"] = no2;
+        //     if (voc > 0 && voc < 1000)
+        //         doc["voc"] = voc;
+        //     if (co > 0 && co < 2000)
+        //         doc["co"] = co;
+        //     if (c2h5oh > 0 && c2h5oh < 1000)
+        //         doc["c2h5oh"] = c2h5oh;
+        // }
+
+
+
+        //Rami - 09 07 26
+
+           if (gas)
         {
-            if (no2 > 0 && no2 < 1000)
-                doc["no2"] = no2;
-            if (voc > 0 && voc < 1000)
-                doc["voc"] = voc;
-            if (co > 0 && co < 2000)
-                doc["co"] = co;
-            if (c2h5oh > 0 && c2h5oh < 1000)
-                doc["c2h5oh"] = c2h5oh;
+            doc["no2"] = constrain(no2, 0.0f, 999.999f);
+            doc["voc"] = constrain(voc, 0.0f, 999.999f);
+            doc["co"] = constrain(co, 0.0f, 1999.999f);
+            doc["c2h5oh"] = constrain(c2h5oh, 0.0f, 999.999f);
         }
 
         if (co_hd)
@@ -3843,16 +3856,63 @@ int16_t read_ozone()
     return ozone;
 }
 
+// void read_multigas()
+// {
+//     sensore.preheated();
+//     vTaskDelay(pdMS_TO_TICKS(1000));
+//     sensore.unPreheated();
+//     vTaskDelay(pdMS_TO_TICKS(1000));
+//     no2 = (sensore.getGM102B() / 100.0 - GM102B_init) * (GM102B_ppm / GM102B_dV) * 1.881809;
+//     co = (sensore.getGM702B() / 100.0 - GM702B_init) * (GM702B_ppm / GM702B_dV) * 0.0649806579693704;
+//     voc = (sensore.getGM502B() / 100.0 - GM502B_init) * (GM502B_ppm / GM502B_dV);
+//     // MultiGas data read
+// }
+
+//Rami - 09 07 26
 void read_multigas()
 {
     sensore.preheated();
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    sensore.unPreheated();
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    no2 = (sensore.getGM102B() / 100.0 - GM102B_init) * (GM102B_ppm / GM102B_dV) * 1.881809;
-    co = (sensore.getGM702B() / 100.0 - GM702B_init) * (GM702B_ppm / GM702B_dV) * 0.0649806579693704;
-    voc = (sensore.getGM502B() / 100.0 - GM502B_init) * (GM502B_ppm / GM502B_dV);
-    // MultiGas data read
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    uint32_t raw_no2 = sensore.getGM102B();
+    uint32_t raw_co  = sensore.getGM702B();
+    uint32_t raw_voc = sensore.getGM502B();
+
+    float no2_voltage = raw_no2 / 100.0f;
+    float co_voltage  = raw_co  / 100.0f;
+    float voc_voltage = raw_voc / 100.0f;
+
+    if (millis() < MULTIGAS_WARMUP_MS) {
+        no2 = 0.0f;
+        co = 0.0f;
+        voc = 0.0f;
+
+        Serial.printf("[MULTIGAS] warmup active raw GM102B=%lu GM702B=%lu GM502B=%lu\n",
+                      raw_no2, raw_co, raw_voc);
+        return;
+    }
+
+    float no2_signed = (no2_voltage - GM102B_init) *
+                       (GM102B_ppm / GM102B_dV) *
+                       1.881809f;
+
+    no2 = no2_signed;
+
+    co = (co_voltage - GM702B_init) *
+         (GM702B_ppm / GM702B_dV) *
+         0.0649806579693704f;
+
+    voc = (voc_voltage - GM502B_init) *
+          (GM502B_ppm / GM502B_dV);
+
+    if (no2 < 1.0f) no2 = 0.0f;
+    if (co  < 1.0f) co  = 0.0f;
+    if (voc < 0.0f) voc = 0.0f;
+
+    Serial.printf("[MULTIGAS] GM102B=%lu GM702B=%lu GM502B=%lu | NO2=%.3f CO=%.3f VOC=%.3f\n",
+                  raw_no2, raw_co, raw_voc, no2, co, voc);
+    Serial.printf("[MULTIGAS] NO2 signed=%.3f published=%.3f\n", no2_signed, no2);
+    Serial.printf("[MULTIGAS] NO2 voltage=%.2f baseline=%.2f\n", no2_voltage, GM102B_init);
 }
 
 void read_co_hd()
@@ -5192,8 +5252,9 @@ unsigned long get_epoch_ntp_server()
     }
 
     // Aggiungi offset fuso orario (1 ora per CET/CEST)
-    unsigned long epochWithOffset = (unsigned long)now + TIMEZONE_OFFSET;
-    Serial.printf("[TIME] NTP sincronizzato: %lu + %lu = %lu\n", (unsigned long)now, TIMEZONE_OFFSET, epochWithOffset);
+   // unsigned long epochWithOffset = (unsigned long)now + TIMEZONE_OFFSET;
+   unsigned long epochWithOffset = (unsigned long)now;    
+   Serial.printf("[TIME] NTP sincronizzato: %lu + %lu = %lu\n", (unsigned long)now, TIMEZONE_OFFSET, epochWithOffset);
 
     return epochWithOffset;
 }

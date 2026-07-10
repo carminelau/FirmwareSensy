@@ -89,6 +89,8 @@
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
+#define MULTIGAS_WARMUP_MS 120000UL //Rami - 09 07 26
+
 /**
  * Configurazione FreeRTOS Task
  * Core allocation e task priorities
@@ -265,7 +267,9 @@ float O3 = 0.0;
 float adc1_O3, adc2_O3;
 
 // Multigas (0x08)
-float no2, c2h5oh, voc, co;
+//float no2, c2h5oh, voc, co;
+//Rami - 09 07 26
+float no2 = 0.0f, c2h5oh = 0.0f, voc = 0.0f, co = 0.0f;
 float nh3;
 
 // CO_HD Sensor (0x74)
@@ -293,10 +297,16 @@ bool so2_hd_read_ok = false;
 bool sen55_read_ok  = false;
 
 // Calibration constants from PDF
-float GM102B_init = 1.41, GM102B_dV = -1.03, GM102B_ppm = 5;
-float GM302B_init = 0.94, GM302B_dV = -0.46, GM302B_ppm = 50;
-float GM502B_init = 1.42, GM502B_dV = -0.89, GM502B_ppm = 50;
-float GM702B_init = 1.22, GM702B_dV = 0.87, GM702B_ppm = 150;
+// float GM102B_init = 1.41, GM102B_dV = -1.03, GM102B_ppm = 5;
+// float GM302B_init = 0.94, GM302B_dV = -0.46, GM302B_ppm = 50;
+// float GM502B_init = 1.42, GM502B_dV = -0.89, GM502B_ppm = 50;
+// float GM702B_init = 1.22, GM702B_dV = 0.87, GM702B_ppm = 150;
+
+//Rami - 09 07 26
+float GM102B_init = 1.10f, GM102B_dV = -1.03f, GM102B_ppm = 5.0f;
+float GM302B_init = 0.94f, GM302B_dV = -0.46f, GM302B_ppm = 50.0f;
+float GM502B_init = 5.18f, GM502B_dV = -0.89f, GM502B_ppm = 50.0f;
+float GM702B_init = 8.36f, GM702B_dV =  0.87f, GM702B_ppm = 150.0f;
 
 // PMS/SPS
 float pmAe1_0, pmAe2_5, pmAe10_0;
