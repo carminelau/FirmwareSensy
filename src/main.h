@@ -5,12 +5,14 @@
  **********************************/
 // Core
 #include <Arduino.h>
+#include "app_config.h"
+#include "pollutant_mask.h"
+#include "protocol_contracts.h"
 #include <Wire.h>
 #include <math.h>
 #include <EEPROM.h>
 #include <SoftwareSerial.h>
 #include <time.h>
-#include <TimeLib.h>
 #include "esp_task_wdt.h"
 #include <RTClib.h>  // RTC I2C support
 
@@ -19,9 +21,11 @@
 #include <Multichannel_Gas_GMXXX.h>
 #include "DFRobot_OzoneSensor.h"
 #include "DFRobot_MultiGasSensor.h"
-#undef DBG  // Undefine macro conflittuale prima di includere MICS
 #include "PMserial.h"
+#if ENABLE_MICS4514
+#undef DBG  // Undefine macro conflittuale prima di includere MICS
 #include "DFRobot_MICS.h"
+#endif
 #include <sps30.h>
 #include "SensirionI2CSen5x.h"
 #include <SensirionI2cScd30.h>
@@ -58,11 +62,11 @@
 // JSON
 #include "ArduinoJson.h"
 
+// Logging dopo le librerie: evita di alterare i loro parametri default Serial.
+#include "firmware_logging.h"
+
 // Libreria personalizzata
 //#include "hywdc6e-lib.h"
-
-// STL
-#include <vector>
 
 /**********************************
  *      DEFINIZIONI GENERALI      *
@@ -84,7 +88,9 @@
 
 // MICS4514
 #define CALIBRATION_TIME 1
+#if ENABLE_MICS4514
 #define MICS_I2C_ADDRESS MICS_ADDRESS_0
+#endif
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
@@ -187,14 +193,14 @@ const char *verionBoard = STR(YEAR) "V" STR(VERSION);
 /**********************************
  *     VARIABILI DI STATO         *
  **********************************/
-bool sps, ozone, pmsa003, gas, co_hd, no2_hd, o3_hd, so2_hd, sht, ane, low, lux, soil, sniffer;
+bool sps, ozone, pmsa003, gas, co_hd, no2_hd, o3_hd, so2_hd, sht, ane, low, lux, soil;
 bool sen55, scd30, scd41, mics4514;
 bool accesspoint, relay1, relay2;
+bool spiffsReady = false;
 
 int saveCounterSD = 0;
 int saveCounterSPIFFS = 0;
 int epochs = 0;
-int resetCount = 0;
 
 volatile int state = LOW;
 volatile int state_short = LOW;
@@ -230,14 +236,13 @@ extern TaskHandle_t wifiNotifierTaskHandle;
 extern TaskHandle_t cycleTaskHandle;
 // Task handle for persistent monitor task
 extern TaskHandle_t monitorTaskHandle;
-// pending reboot to apply sniffer EEPROM change
-extern bool pendingSnifferReboot;
-
 // Runtime control helpers
 void start_sniffer_manager();
 void stop_sniffer_manager();
 
+#if ENABLE_MICS4514
 DFRobot_MICS_I2C mics(&Wire, MICS_I2C_ADDRESS);
+#endif
 DFRobot_OzoneSensor Ozone;
 GAS_GMXXX<TwoWire> sensore;
 SerialPM pms(PMSA003, RX_PMS_PIN, TX_PMS_PIN);
@@ -247,8 +252,8 @@ SensirionI2cScd30 scd3x;
 SensirionI2cScd4x scd4x;
 ModbusSensorLibrary sensors(RO_PIN, DI_PIN, DE_PIN, RE_PIN);
 
-std::vector<String> Pollutants;
-std::vector<String> PollutantsMissing;
+PollutantMask Pollutants;
+PollutantMask PollutantsMissing;
 
 SFE_UBLOX_GNSS myGNSS;
 double latitude = 0;
@@ -364,8 +369,6 @@ const char *ntpServer2 = "ntp.unisa.it";
 char ssidAP[18];
 char psswdAP[10];
 char psswdAPssid[10];
-String eeprom_ssid = "";
-String eeprom_psswd = "";
 bool arrivedlow = false;
 
 /**********************************
@@ -448,16 +451,17 @@ extern const uint32_t DEVICE_FORGET_MS;
 // ===== Strutture =====
 struct DeviceInfo {
   uint8_t mac[6];
-  int lastRssi;
+  int8_t lastRssi;
+  uint8_t firstChannel;
   uint32_t lastSeen;       // millis
   uint32_t firstSeen;      // millis (quando è stato creato il record)
   uint32_t count;          // numero di pacchetti visti
-  int firstChannel;
 
   // Campi per sessione / accumulo tempo
   uint32_t sessionStart;   // millis, 0 se non in sessione
   uint32_t cumulativeSeenMs; // ms totali accumulati da sessioni chiuse
 };
+static_assert(sizeof(DeviceInfo) == 28, "DeviceInfo layout changed: RAM budget invalid");
 
 typedef struct {
   uint8_t mac[6];
@@ -489,22 +493,11 @@ DeviceInfo devices[MAX_DEVICES];
 int devicesCount = 0;
 portMUX_TYPE devicesMux = portMUX_INITIALIZER_UNLOCKED;
 
-static QueueHandle_t _pktQueue = NULL;
 QueueHandle_t pktQueue = NULL;
 volatile uint32_t droppedPackets = 0;
 
 // channel hop control
-static TaskHandle_t channelHopHandle = NULL;
 static volatile bool channelHopShouldStop = false;
-
-typedef void (*mqtt_disconnect_cb_t)();
-typedef void (*mqtt_reconnect_cb_t)();
-
-// MQTT callbacks + saved creds per doFullSweepAndReconnect
-static mqtt_disconnect_cb_t mqttDisconnectCb = NULL;
-static mqtt_reconnect_cb_t mqttReconnectCb = NULL;
-
-const unsigned long SWEEP_DURATION_MS = 20000UL; // 20s sweep
 
 // flag condiviso monitorDone: il monitor imposta true quando ha finito la sua attività
 static volatile bool monitorDone = false;
@@ -529,8 +522,6 @@ String macToString(const uint8_t *mac);
 void write_inside_eeprom(bool val, int addr);
 void read_topic_eeprom();
 void read_version_eeprom();
-bool read_sniffer_eeprom();
-void write_sniffer_eeprom(bool val);
 void write_conf_eeprom(bool b);
 bool read_conf_eeprom();
 bool read_wifi_eeprom();
@@ -623,7 +614,6 @@ void create_access_point();
 void disconnect_access_point();
 void get_mac_address();
 String get_id_square();
-String get_list_wifi(bool forceRefresh = false);
 
 // MQTT
 void init_mqtt();
@@ -638,10 +628,10 @@ void check_reply_ID();
 // OTA
 String get_header_value(String header, String headerName);
 void check_update_OTA();
-void exec_update_OTA();
+void exec_update_OTA(const String &newFirmwareName);
 
 // Storage SPIFFS e SD
-void init_spiffs();
+bool init_spiffs();
 String read_file_storage(fs::FS &fs, const char *path);
 bool write_file_storage(fs::FS &fs, const char *path, const char *message);
 void delete_file_storage(fs::FS &fs, const char *path);
@@ -675,7 +665,7 @@ void loop_1_core(void *pv);
 bool get_nearest_data(const String &params);
 void parse_response(const String &payload);
 void process_token(const String &token);
-String vector_to_encoded_json_array(const std::vector<String> &vec);
+String pollutant_mask_to_encoded_json_array(const PollutantMask &pollutants);
 
 // ===== Funzioni esportate (sniffer) =====
 

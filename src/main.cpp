@@ -19,10 +19,7 @@
 // ============================================================================
 // LOGGING E RIAVVIO PERIODICO (CONFIGURABILI DA BUILD_FLAGS)
 // ============================================================================
-// Imposta a 0 per disabilitare le stampe in produzione.
-#ifndef FW_LOG_ENABLED
-#define FW_LOG_ENABLED 1
-#endif
+// Logging compile-time definito in firmware_logging.h.
 
 // Logging tags removed - using Serial only
 
@@ -37,381 +34,28 @@
 #define SNIFFER_DEVICE_MULTIPLIER 1.30f // +30% di dispositivi
 #endif
 
-#if !FW_LOG_ENABLED
-class NullSerialClass : public Stream
-{
-public:
-    void begin(unsigned long) {}
-    void end() {}
-    int available() override { return 0; }
-    int read() override { return -1; }
-    int peek() override { return -1; }
-    void flush() override {}
-    size_t write(uint8_t) override { return 1; }
-};
-static NullSerialClass NullSerial;
-#define Serial NullSerial
+#if FW_LOG_LEVEL >= 3
+#define FW_SAMPLE_BEGIN(timer, cycle, sensor)                                      \
+    do                                                                             \
+    {                                                                              \
+        (timer) = millis();                                                         \
+        Serial.printf("DEBUG: [SAMPLE] cycle=%lu sensor=%s START\n",              \
+                      static_cast<unsigned long>(cycle), sensor);                   \
+    } while (0)
+#define FW_SAMPLE_END(timer, cycle, sensor, result)                                \
+    Serial.printf("DEBUG: [SAMPLE] cycle=%lu sensor=%s END result=%s duration=%lu ms\n", \
+                  static_cast<unsigned long>(cycle), sensor, result, millis() - (timer))
+#define FW_SAMPLE_VALUES(cycle, sensor, format, ...)                               \
+    Serial.printf("DEBUG: [SAMPLE] cycle=%lu sensor=%s " format "\n",              \
+                  static_cast<unsigned long>(cycle), sensor, __VA_ARGS__)
+#else
+#define FW_SAMPLE_BEGIN(timer, cycle, sensor)                                      \
+    do { (void)(timer); (void)(cycle); (void)(sensor); } while (0)
+#define FW_SAMPLE_END(timer, cycle, sensor, result)                                \
+    do { (void)(timer); (void)(cycle); (void)(sensor); (void)(result); } while (0)
+#define FW_SAMPLE_VALUES(cycle, sensor, format, ...) do { } while (0)
 #endif
 
-#if FW_LOG_ENABLED
-namespace SERIAL_TRANSLATION
-{
-    struct PhrasePair
-    {
-        const char *italian;
-        const char *english;
-    };
-
-    static const PhrasePair PHRASES[] = {
-        {"Fallimento", "Failure"},
-        {"fallito", "failed"},
-        {"fallita", "failed"},
-        {"impossibile", "unable"},
-        {"Impossibile", "Unable"},
-        {"inizializzazione", "initialization"},
-        {"Inizializzazione", "Initialization"},
-        {"configurazione", "configuration"},
-        {"Configurazione", "Configuration"},
-        {"completata", "completed"},
-        {"riavvio", "reboot"},
-        {"Riavvio", "Reboot"},
-        {"Modalita", "Mode"},
-        {"modalita", "mode"},
-        {"attiva", "active"},
-        {"attivo", "active"},
-        {"rilevata", "detected"},
-        {"rilevato", "detected"},
-        {"NON RILEVATO", "NOT DETECTED"},
-        {"non rilevato", "not detected"},
-        {"Errore", "Error"},
-        {"errore", "error"},
-        {"possibili cause", "possible causes"},
-        {"sensore", "sensor"},
-        {"Sensore", "Sensor"},
-        {"timeout", "timeout"},
-        {"connessione", "connection"},
-        {"Connesso", "Connected"},
-        {"connesso", "connected"},
-        {"disconnesso", "disconnected"},
-        {"scansione", "scan"},
-        {"Scansione", "Scan"},
-        {"sincronizzazione", "synchronization"},
-        {"Sincronizzato", "Synchronized"},
-        {"nessuna fonte disponibile", "no source available"},
-        {"Nessun ACK ricevuto", "No ACK received"},
-        {"Tentativo", "Attempt"},
-        {"Apertura fallita", "Open failed"},
-        {"Nessun altro file disponibile", "No other file available"},
-        {"Pulizia messaggi in coda", "Clearing queued messages"},
-        {"Riconnessione a server", "Reconnecting to server"},
-        {"Stato salvato in EEPROM", "State saved in EEPROM"},
-        {"Reset richiesto", "Reset requested"},
-        {"Dispositivo", "Device"},
-        {"non trovato", "not found"},
-        {"non disponibile", "not available"},
-        {"FILE LOCALE", "LOCAL FILE"},
-        {"NESSUNA FONTE DI TEMPO DISPONIBILE", "NO TIME SOURCE AVAILABLE"},
-        {"potrebbe essere impreciso", "may be inaccurate"},
-        {"ha perso sincronizzazione", "lost synchronization"},
-        {"batteria scarica", "battery drained"},
-        {"Lettura saltata", "Read skipped"},
-        {"prossima disponibile", "next available"},
-        {"Timeout connessione", "Connection timeout"},
-        {"Gerarchia sincronizzazione", "Synchronization hierarchy"},
-        {"MODALITÀ OFFLINE", "OFFLINE MODE"},
-        {"Salvataggio dati locale", "Local data saving"},
-        {"Ora da FILE LOCALE", "Time from LOCAL FILE"},
-        {"Dispositivo non connesso", "Device not connected"},
-        {"Nessuna risposta valida ricevuta", "No valid response received"},
-        {"FALLITO", "FAILED"},
-        {"DIAGNOSTICA", "DIAGNOSTICS"},
-        {"Trovato", "Found"},
-        {"Dispositivo trovato", "Device found"},
-        {"NON DISPONIBILE", "NOT AVAILABLE"},
-        {"inizializzata", "initialized"},
-        {"Stato", "Status"},
-        {"Skip", "Skip"},
-        {"Checking Wire transmission", "Checking Wire transmission"},
-        {"Wire error", "Wire error"},
-        {"Wire OK", "Wire OK"},
-        {"calling begin()", "calling begin()"},
-        {"begin() successful", "successful"},
-        {"Temp compensation", "Temperature compensation"},
-        {"PASSIVITY mode", "PASSIVITY mode"},
-        {"Iterazione", "Iteration"},
-        {"START PROGRAM", "START PROGRAM"},
-        {"Heap", "Memory"},
-        {"Card Failed", "Card failed"},
-        {"f_mount failed", "mounting failed"},
-        {"File system is not mounted", "File system is not mounted"},
-        {"ModbusSensorLibrary", "ModbusSensorLibrary"},
-        {"[OTA]", "[OTA]"},
-        {"[CONFIG]", "[CONFIG]"},
-        {"[MAC]", "[MAC]"},
-        {"[BOOT]", "[BOOT]"},
-        {"[STATUS]", "[STATUS]"},
-        {"[NETWORK]", "[NETWORK]"},
-        {"[LED]", "[LED]"},
-        {"[OK]", "[OK]"},
-        {"[DEBUG]", "[DEBUG]"},
-        {"[I2C]", "[I2C]"},
-        {"[WARNING]", "[WARNING]"},
-        {"[ERROR]", "[ERROR]"},
-        {"[INFO]", "[INFO]"},
-        {"[DIAG]", "[DIAG]"},
-        {"[TIME]", "[TIME]"},
-        {"Tentativo SERVER HTTP", "HTTP Server attempt"},
-        {"Tentativo NTP", "NTP attempt"},
-        {"Tentativo RTC I2C", "I2C RTC attempt"},
-        {"Tentativo FILE LOCALE", "Local file attempt"},
-        {"✓", "✓"},
-        {"✗", "✗"},
-        {"⊘", "⊘"},
-        {"WiFi non connesso", "WiFi not connected"},
-        {"WiFi offline", "WiFi offline"},
-        {"non connesso", "not connected"},
-        {"Dispositivo non connesso", "Device not connected"},
-        {"GREEN", "GREEN"},
-        {"RED", "RED"},
-        {"BLUE", "BLUE"},
-        {"configured", "configured"},
-        {"running", "running"}};
-
-    static String translate_to_english(const String &message)
-    {
-        if (message.indexOf("| EN:") >= 0)
-        {
-            return String();
-        }
-
-        String translated = message;
-        bool changed = false;
-
-        for (size_t i = 0; i < (sizeof(PHRASES) / sizeof(PHRASES[0])); ++i)
-        {
-            if (translated.indexOf(PHRASES[i].italian) >= 0)
-            {
-                translated.replace(PHRASES[i].italian, PHRASES[i].english);
-                changed = true;
-            }
-        }
-
-        if (!changed || translated == message)
-        {
-            return String();
-        }
-
-        return translated;
-    }
-}
-
-class BilingualSerialClass
-{
-public:
-    explicit BilingualSerialClass(HardwareSerial &serialRef) : serialRef_(serialRef) {}
-
-    void begin(unsigned long baudRate)
-    {
-        serialRef_.begin(baudRate);
-    }
-
-    int available()
-    {
-        return serialRef_.available();
-    }
-
-    String readStringUntil(char terminator)
-    {
-        return serialRef_.readStringUntil(terminator);
-    }
-
-    void flush()
-    {
-        serialRef_.flush();
-    }
-
-    template <typename T>
-    size_t print(const T &value)
-    {
-        return serialRef_.print(value);
-    }
-
-    template <typename T>
-    size_t print(const T &value, int format)
-    {
-        return serialRef_.print(value, format);
-    }
-
-    size_t println()
-    {
-        return serialRef_.println();
-    }
-
-    size_t println(const String &message)
-    {
-        return print_bilingual_line(message);
-    }
-
-    size_t println(const char *message)
-    {
-        if (message == NULL)
-        {
-            return serialRef_.println();
-        }
-
-        return print_bilingual_line(String(message));
-    }
-
-    template <typename T>
-    size_t println(const T &value)
-    {
-        return serialRef_.println(value);
-    }
-
-    template <typename T>
-    size_t println(const T &value, int format)
-    {
-        return serialRef_.println(value, format);
-    }
-
-    template <typename... Args>
-    int printf(const char *format, Args... args)
-    {
-        int len = snprintf(nullptr, 0, format, args...);
-        if (len <= 0)
-        {
-            return serialRef_.printf(format, args...);
-        }
-
-        std::vector<char> buffer((size_t)len + 1U);
-        snprintf(buffer.data(), buffer.size(), format, args...);
-        String message(buffer.data());
-
-        // Remove trailing newlines/carriage returns for translation processing
-        bool hadNewline = false;
-        while (message.endsWith("\n") || message.endsWith("\r"))
-        {
-            hadNewline = true;
-            message.remove(message.length() - 1);
-        }
-
-        if (message.length() == 0)
-        {
-            return serialRef_.printf(format, args...);
-        }
-
-        // Always apply translation regardless of newline
-        const String english = SERIAL_TRANSLATION::translate_to_english(message);
-        
-        if (english.length() == 0)
-        {
-            // No translation found, print original
-            if (hadNewline)
-                return serialRef_.println(message);
-            else
-                return serialRef_.print(message);
-        }
-
-        // Print with English translation
-        if (hadNewline)
-            return serialRef_.println(message + " | EN: " + english);
-        else
-            return serialRef_.print(message + " | EN: " + english);
-    }
-
-private:
-    HardwareSerial &serialRef_;
-
-    size_t print_bilingual_line(const String &message)
-    {
-        const String english = SERIAL_TRANSLATION::translate_to_english(message);
-
-        if (english.length() == 0)
-        {
-            return serialRef_.println(message);
-        }
-
-        return serialRef_.println(message + " | EN: " + english);
-    }
-};
-
-static HardwareSerial &RawSerial = ::Serial;
-static BilingualSerialClass SerialBilingual(RawSerial);
-#define Serial SerialBilingual
-#endif
-
-// ============================================================================
-// SEZIONE 1: COSTANTI CENTRALIZZATE
-// ============================================================================
-
-// EEPROM address map
-namespace EEPROM_ADDR
-{
-    constexpr int SSID_OFFSET = 0;
-    constexpr int PASSWORD_OFFSET = 32;
-    constexpr int WIFI_FLAG_ADDR = 97;
-    constexpr int VERSION_OFFSET = 104;
-    constexpr int TOPIC_OFFSET = 126;
-    constexpr int CONF_FLAG_ADDR = 101;
-    constexpr int LOW_POWER_FLAG_ADDR = 205;
-    constexpr int SNIFFER_FLAG_ADDR = 206;
-    constexpr int RELAY1_STATE_ADDR = 207;      // Stato relay 1
-    constexpr int RELAY2_STATE_ADDR = 208;      // Stato relay 2
-    constexpr int EEPROM_INIT_FLAG_ADDR = 511;  // Flag per verificare se EEPROM è stata mai inizializzata
-    constexpr uint8_t EEPROM_INIT_MAGIC = 0xAA; // Valore magico per EEPROM inizializzata
-}
-
-// Serial configuration
-namespace SERIAL_CONFIG
-{
-    constexpr unsigned long BAUD_RATE = 9600;
-    constexpr unsigned long DELAY_SHORT = 500;
-    constexpr unsigned long DELAY_MID = 1000;
-    constexpr unsigned long DELAY_LONG = 12000;
-}
-
-// WiFi configuration
-namespace WIFI_CONFIG
-{
-    constexpr int MAX_SSID_LENGTH = 32;
-    constexpr int MAX_PASSWORD_LENGTH = 64;
-    constexpr int MAX_CONNECT_ATTEMPTS = 6;
-    constexpr unsigned long WIFI_CONNECT_TIMEOUT_MS = 1000;
-}
-
-// Sensor read delays
-namespace SENSOR_DELAYS
-{
-    constexpr unsigned long SENSOR_INIT_DELAY = 10000; // ms
-    constexpr unsigned long SENSOR_READ_DELAY = 1000;  // ms
-}
-
-// LED colors (RGB format)
-namespace LED_COLORS
-{
-    // Struct per rappresentare colori RGB
-    struct RGB
-    {
-        uint8_t r, g, b;
-    };
-
-    // Colori compositi
-    constexpr RGB BLUE = {0, 0, 255};
-    constexpr RGB GREEN = {0, 255, 0};
-    constexpr RGB PURPLE = {255, 0, 255};
-    constexpr RGB RED = {255, 0, 0};
-    constexpr RGB YELLOW = {255, 255, 0};
-    constexpr RGB CYAN = {0, 255, 255};
-    constexpr RGB WHITE = {255, 255, 255};
-    constexpr RGB BLACK = {0, 0, 0};
-
-    // Componenti singoli (legacy support)
-    constexpr uint8_t BLUE_R = 0, BLUE_G = 0, BLUE_B = 255;
-    constexpr uint8_t GREEN_R = 0, GREEN_G = 255, GREEN_B = 0;
-    constexpr uint8_t PURPLE_R = 255, PURPLE_G = 0, PURPLE_B = 255;
-}
-
-// ============================================================================
 // SEZIONE 2: VARIABILI GLOBALI E SINCRONIZZAZIONE (AGGIUNTE)
 // ============================================================================
 
@@ -443,7 +87,6 @@ QueueHandle_t wifiEventQueue = NULL;
 TaskHandle_t wifiNotifierTaskHandle = NULL;
 TaskHandle_t cycleTaskHandle = NULL;
 TaskHandle_t monitorTaskHandle = NULL;
-bool pendingSnifferReboot = false;
 
 // ============================================================================
 // SEZIONE 2C: MAPPA SENSORI PRESENTI - RISULTATI SCANSIONE I2C
@@ -548,6 +191,62 @@ static void resume_wifi_after_data_extraction(bool wifiPaused, bool needWifi)
     Serial.println("DEBUG: WiFi on dopo estrazione dati sensori");
     WiFi.mode(WIFI_STA);
     connect_wifi_network();
+}
+
+struct TemporaryWifiState
+{
+    bool radioWasOff = false;
+};
+
+static bool begin_temporary_wifi(TemporaryWifiState &wifiState, const char *operation)
+{
+    wifiState.radioWasOff = (WiFi.getMode() == WIFI_OFF);
+
+    if (WiFi.status() == WL_CONNECTED)
+    {
+        return true;
+    }
+
+    // Non alterare l'AP di configurazione: senza una connessione STA non c'e'
+    // comunque un percorso verso il server.
+    if (AP || !conf)
+    {
+        Serial.printf("DEBUG: [%s] WiFi non disponibile\n", operation);
+        return false;
+    }
+
+    Serial.printf("DEBUG: [%s] Accensione WiFi temporanea\n", operation);
+    if (wifiState.radioWasOff)
+    {
+        WiFi.mode(WIFI_STA);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    connect_wifi_network();
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        Serial.printf("WARNING: [%s] Connessione WiFi fallita\n", operation);
+        return false;
+    }
+
+    return true;
+}
+
+static void end_temporary_wifi(const TemporaryWifiState &wifiState, const char *operation)
+{
+    if (!wifiState.radioWasOff)
+    {
+        return;
+    }
+
+    Serial.printf("DEBUG: [%s] Ripristino WiFi spento\n", operation);
+    if (clientMQTT.connected())
+    {
+        clientMQTT.disconnect();
+    }
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    connected = false;
 }
 
 static void i2c_note_error(const char *operation)
@@ -818,7 +517,29 @@ String eeprom_read_string(int offset)
  */
 void print_eeprom_config()
 {
-    // Stampe spostate a Serial nel setup() - funzione vuota per compatibilità
+    const String savedSsid = eeprom_read_string(EEPROM_ADDR::SSID_OFFSET);
+    const String savedPassword = eeprom_read_string(EEPROM_ADDR::PASSWORD_OFFSET);
+    const bool relay1Stored = read_relay1_eeprom();
+    const bool relay2Stored = read_relay2_eeprom();
+    const bool legacySnifferFlag = eeprom_read_bool(EEPROM_ADDR::SNIFFER_FLAG_ADDR);
+    const uint8_t initMarker = EEPROM.read(EEPROM_ADDR::EEPROM_INIT_FLAG_ADDR);
+
+    Serial.printf("[SAVED] board=%s | hw=%s | build=%s %s\n",
+                  BOARD_NAME, verionBoard, __DATE__, __TIME__);
+    Serial.printf("[SAVED] device_id=%s | firmware=%s | mac=%s\n",
+                  topic.c_str(), nameBinESP.c_str(), myConcatenation);
+    Serial.printf("[SAVED] wifi_ssid=%s | wifi_password=%s | password_length=%u\n",
+                  savedSsid.length() ? savedSsid.c_str() : "<empty>",
+                  savedPassword.length() ? "********" : "<empty>",
+                  static_cast<unsigned>(savedPassword.length()));
+    Serial.printf("[SAVED] conf=%d | wifi=%d | low=%d | relay1=%d | relay2=%d\n",
+                  conf, wifi, low, relay1Stored, relay2Stored);
+    Serial.printf("[SAVED] eeprom_magic=0x%02X | legacy_sniffer_flag=%d (reserved/ignored)\n",
+                  initMarker, legacySnifferFlag);
+    Serial.printf("[RUNTIME] log=%s | serial=%lu | sniffer=ALWAYS_ON\n",
+                  FW_LOG_LEVEL >= FW_LOG_FULL ? "FULL" : "MINIMAL", SERIAL_CONFIG::BAUD_RATE);
+    Serial.printf("[RUNTIME] backend=%s:%d | mqtt_publish=%s | mqtt_listen=%s\n",
+                  host.c_str(), port, topic.c_str(), topicListen.c_str());
 }
 
 // ============================================================================
@@ -907,24 +628,6 @@ void write_relay2_eeprom(bool val)
 }
 
 /**
- * Legge lo stato sniffer da EEPROM
- * @return true se sniffer attivo, false altrimenti
- */
-bool read_sniffer_eeprom()
-{
-    return eeprom_read_bool(EEPROM_ADDR::SNIFFER_FLAG_ADDR);
-}
-
-/**
- * Scrive lo stato sniffer in EEPROM
- * @param val Valore booleano
- */
-void write_sniffer_eeprom(bool val)
-{
-    eeprom_write_bool(EEPROM_ADDR::SNIFFER_FLAG_ADDR, val, "SNIFFER");
-}
-
-/**
  * Legge il topic MQTT da EEPROM
  */
 void read_topic_eeprom()
@@ -990,16 +693,9 @@ void delete_wifi_settings()
  */
 void get_mac_address()
 {
-    char ssid1[12];
-    char ssid2[12];
-
     uint64_t chipid = ESP.getEfuseMac();
     uint16_t chip = (uint16_t)(chipid >> 32);
-
-    snprintf(ssid1, sizeof(ssid1), "%04X", chip);
-    snprintf(ssid2, sizeof(ssid2), "%08X", (uint32_t)chipid);
-
-    snprintf(myConcatenation, sizeof(myConcatenation), "%s%s", ssid1, ssid2);
+    snprintf(myConcatenation, sizeof(myConcatenation), "%04X%08X", chip, (uint32_t)chipid);
 }
 
 /**
@@ -1062,8 +758,6 @@ void print_memory_info()
 // ============================================================================
 
 // Forward declarations per funzioni WiFi
-String get_list_wifi(bool forceRefresh);
-
 /**
  * Esegue l'inizializzazione del sistema all'avvio
  * - Configura seriale e EEPROM
@@ -1078,12 +772,16 @@ void setup()
 
     // ATTESA LUNGHISSIMA per stabilizzazione seriale e monitor
     delay(2000);
-    Serial.println("\nSTART PROGRAM - FirmwareSensy v2024.4");
+    Serial.println("[BOOT] START PROGRAM - FirmwareSensy v2024.4");
     Serial.flush();
     delay(500);
 
-    // Abilita TUTTI i livelli di log
+    // Release silenziosa; diagnostica completa solo con FW_LOG_LEVEL=3.
+#if FW_LOG_LEVEL >= 3
     esp_log_level_set("*", ESP_LOG_VERBOSE);
+#else
+    esp_log_level_set("*", ESP_LOG_WARN);
+#endif
 
     print_memory_info();
 
@@ -1091,7 +789,7 @@ void setup()
     led_startup_status();
 
     // Inizializza EEPROM
-    if (!EEPROM.begin(512))
+    if (!EEPROM.begin(EEPROM_ADDR::EEPROM_SIZE))
     {
         Serial.println("ERROR: Fallimento inizializzazione EEPROM");
         return;
@@ -1122,10 +820,10 @@ void setup()
     conf = read_conf_eeprom();
     wifi = read_wifi_eeprom();
     low = read_low_eeprom();
-    sniffer = read_sniffer_eeprom();
+    topicListen = topic + "GESTORE";
 
-    Serial.printf("[CONFIG] conf=%d | wifi=%d | low=%d | sniffer=%d\n", conf, wifi, low, sniffer);
-    Serial.printf("[MAC] %s\n", myConcatenation);
+    Serial.printf("[CONFIG] conf=%d | wifi=%d | low=%d | sniffer=ALWAYS_ON\n", conf, wifi, low);
+    print_eeprom_config();
     vTaskDelay(pdMS_TO_TICKS(100));
 
     // Crea mutex e configura Wire prima di qualsiasi periferica I2C/RTC.
@@ -1141,8 +839,8 @@ void setup()
     Serial.println("[BOOT] Initializing RTC I2C...");
     init_rtc_i2c();
 
-    Serial.printf("[STATUS] CONF:%s | WIFI:%s | LOW:%s | SNIFFER:%s\n",
-                  conf ? "Y" : "N", wifi ? "Y" : "N", low ? "Y" : "N", sniffer ? "Y" : "N");
+    Serial.printf("[STATUS] CONF:%s | WIFI:%s | LOW:%s | SNIFFER:ALWAYS_ON\n",
+                  conf ? "Y" : "N", wifi ? "Y" : "N", low ? "Y" : "N");
     Serial.printf("[NETWORK] MAC=%s | AP_SSID=%s\n", myConcatenation, ssidAP);
 
     if (!conf)
@@ -1196,6 +894,7 @@ void setup()
         if (n > 0)
         {
             // Costruisci JSON manualmente per il pre-scanning
+            jsonWifi.reserve(2 + static_cast<size_t>(n) * 64U);
             jsonWifi = "[";
             for (int i = 0; i < n; i++)
             {
@@ -1216,8 +915,8 @@ void setup()
         vTaskDelay(pdMS_TO_TICKS(100));
         create_access_point();
         AP = true;
-        Serial.printf("[AP] ACTIVE - SSID:%s | PWD:%s | IP:%s\n",
-                      ssidAP, psswdAPssid, WiFi.softAPIP().toString().c_str());
+        Serial.printf("[AP] ACTIVE - SSID:%s | PWD:******** | IP:%s\n",
+                      ssidAP, WiFi.softAPIP().toString().c_str());
 
         // Loop infinito in attesa di configurazione
         for (;;)
@@ -1328,14 +1027,6 @@ void setup()
     // Inizializza sincronizzazione WiFi
     wifi_synchronization_init();
 
-    // Configura topic MQTT
-    topicListen = topic + "GESTORE";
-
-    // Stampa SUBITO i parametri di configurazione
-    print_eeprom_config();
-    Serial.flush();
-    vTaskDelay(pdMS_TO_TICKS(200)); // Attendi che i log vengano flusati
-
     // Configura NTP e timezone
     configTime(0, 0, ntpServer, ntpServer2);
     set_timezone(timezone_it);
@@ -1357,11 +1048,7 @@ void setup()
         Serial.println("Scheda SD rilevata");
     }
 
-    // Imposta sniffer da EEPROM
-    write_sniffer_eeprom(true);
-    sniffer = read_sniffer_eeprom();
-
-    Serial.println("Inizializzazione SNIFFER...");
+    Serial.println("[SNIFFER] Initializing always-on sniffer...");
     snifferInit();
 
     // Crea semafori
@@ -1480,9 +1167,6 @@ static void closeSessionIfNeededInternal(DeviceInfo &d)
 void loop_0_core(void *pv)
 {
     (void)pv;
-    // Disabilita task watchdog per questo task (previene false positives su Core 0)
-    disableCore0WDT();
-
     unsigned long lastHealthCheck = millis();
     const unsigned long HEALTH_CHECK_INTERVAL = 10000; // 10 sec - controllo ogni 10s
     // IN LOW POWER: max 80 secondi (60s delay + 20s buffer)
@@ -1535,7 +1219,7 @@ void loop_0_core(void *pv)
         }
 
         // === ELABORA PACCHETTI SNIFFER (con timer 30s) ===
-        if (sniffer && pktQueue)
+        if (pktQueue)
         {
             SniffMsg msg;
             unsigned long snifferElapsed = millis() - snifferStartTime;
@@ -1549,15 +1233,15 @@ void loop_0_core(void *pv)
                     // Aggiorna tabella dispositivi in modo thread-safe
                     portENTER_CRITICAL(&devicesMux);
                     int idx = findDeviceIndexLocked(msg.mac);
-                    uint32_t now = millis();
+                    const uint32_t packetNow = millis();
                     if (idx >= 0)
                     {
                         DeviceInfo &d = devices[idx];
                         d.lastRssi = msg.rssi;
-                        d.lastSeen = now;
+                        d.lastSeen = packetNow;
                         d.count++;
                         if (d.sessionStart == 0)
-                            d.sessionStart = now;
+                            d.sessionStart = packetNow;
                     }
                     else
                     {
@@ -1566,11 +1250,11 @@ void loop_0_core(void *pv)
                             DeviceInfo &d = devices[devicesCount];
                             memcpy(d.mac, msg.mac, 6);
                             d.lastRssi = msg.rssi;
-                            d.lastSeen = now;
-                            d.firstSeen = now;
+                            d.lastSeen = packetNow;
+                            d.firstSeen = packetNow;
                             d.count = 1;
                             d.firstChannel = msg.channel;
-                            d.sessionStart = now;
+                            d.sessionStart = packetNow;
                             d.cumulativeSeenMs = 0;
                             devicesCount++;
                         }
@@ -1618,6 +1302,15 @@ void refresh_i2c_runtime_sensors(bool forceReinit = false);
 void i2c_bus_settle(uint32_t delayMs = 250);
 bool i2c_bus_recover_bitbang();
 
+static void log_cycle_summary(uint32_t cycleNumber, const char *phase, const char *transport,
+                              size_t jsonFields, unsigned long cycleStartMs)
+{
+    Serial.printf("[CYCLE] id=%lu mode=%s phase=%s json_fields=%u transport=%s sniffed=%d duration=%lu ms heap=%u\n",
+                  static_cast<unsigned long>(cycleNumber), low ? "LOW" : "NORMAL", phase,
+                  static_cast<unsigned>(jsonFields), transport, num_devices_sniffed,
+                  millis() - cycleStartMs, static_cast<unsigned>(ESP.getFreeHeap()));
+}
+
 /**
  * Task eseguito su Core 1
  * Gestisce il monitoraggio continuo dei sensori
@@ -1638,7 +1331,6 @@ void loop_monitoring(void *pvParameters)
     lastI2cHealthCheckMs = millis();
 
     // Avvia sniffer all'inizio del loop di monitoring
-    if (sniffer)
     {
         startSnifferSingleChannel();
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -1649,6 +1341,12 @@ void loop_monitoring(void *pvParameters)
     {
         // === TIMEOUT ASSOLUTO: Evita blocchi infiniti ===
         cycleStartMs = millis();
+        const uint32_t cycleNumber = monitorCycleCount;
+        const char *cycleTransport = "PENDING";
+        size_t sampledFieldCount = 0;
+        bool cycleSummaryLogged = false;
+        unsigned long sampleStartedMs = 0;
+        float cycleLuxValue = NAN;
         unsigned long cycleTimeoutMs = low ? CYCLE_TIMEOUT_LOW_POWER : CYCLE_TIMEOUT_NORMAL;
 
         debugTs.monitorStartMs = millis();
@@ -1714,6 +1412,9 @@ void loop_monitoring(void *pvParameters)
         bool isOnlineCycle = (resetCount % 2 == 1);  // Cicli dispari: ONLINE
         bool isReadCycle = true;                     // Leggi SEMPRE in low power (ogni ciclo)
         bool isSendCycle = isOnlineCycle;            // Invia SOLO in cicli dispari (ONLINE)
+        const char *cyclePhase = low ? (isOnlineCycle ? "ONLINE" : "OFFLINE") : "ONLINE";
+        Serial.printf("DEBUG: [CYCLE] id=%lu START mode=%s phase=%s\n",
+                      static_cast<unsigned long>(cycleNumber), low ? "LOW" : "NORMAL", cyclePhase);
 
         // === DIAGNOSTICA SENSORI (CHECK PRIMA DI INCREMENTARE CONTATORE) ===
         // Esegui diagnostica al ciclo 0 (startup), se appena configurato, e poi ogni 20 cicli
@@ -1764,8 +1465,8 @@ void loop_monitoring(void *pvParameters)
         }
 
         // === VERIFICHE INIZIALI ===
-        saveCounterSD = get_count_data_saved(SD);
-        saveCounterSPIFFS = get_count_data_saved(SPIFFS);
+        saveCounterSD = sd ? get_count_data_saved(SD) : 0;
+        saveCounterSPIFFS = spiffsReady ? get_count_data_saved(SPIFFS) : 0;
 
         // Se troppi file salvati localmente, connettiti al WiFi per inviare
         if ((saveCounterSD > 20 || saveCounterSPIFFS > 20) && conf && (!low || isSendCycle))
@@ -1825,7 +1526,6 @@ void loop_monitoring(void *pvParameters)
             {
                 if (wifi)
                 {
-                    Serial.println("[OTA] Checking for OTA updates...");
                     check_update_OTA();
                 }
             }
@@ -1872,19 +1572,27 @@ void loop_monitoring(void *pvParameters)
 
             if (ozone)
             {
-                if (take_i2c_mutex("read_ozone", pdMS_TO_TICKS(1500)))
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "OZONE");
+                const bool ozoneLockTaken = take_i2c_mutex("read_ozone", pdMS_TO_TICKS(1500));
+                if (ozoneLockTaken)
                 {
                     O3 = read_ozone();
                     give_i2c_mutex();
                 }
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "OZONE", ozoneLockTaken ? "OK" : "LOCK_TIMEOUT");
+                FW_SAMPLE_VALUES(cycleNumber, "OZONE", "o3=%.2f", O3);
             }
 
             if (scd30)
             {
-                if (take_i2c_mutex("read_scd30", pdMS_TO_TICKS(2500)))
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "SCD30");
+                bool scd30ReadOk = false;
+                const bool scd30LockTaken = take_i2c_mutex("read_scd30", pdMS_TO_TICKS(2500));
+                if (scd30LockTaken)
                 {
-                    if (read_scd30())
+                    scd30ReadOk = read_scd30();
+                    if (scd30ReadOk)
                     {
                         i2c_note_success();
                     }
@@ -1895,13 +1603,21 @@ void loop_monitoring(void *pvParameters)
                     give_i2c_mutex();
                 }
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "SCD30",
+                              !scd30LockTaken ? "LOCK_TIMEOUT" : (scd30ReadOk ? "OK" : "NOT_READY_OR_ERROR"));
+                FW_SAMPLE_VALUES(cycleNumber, "SCD30", "co2=%.2f temp=%.2f hum=%.2f",
+                                 scd30_co2, scd30_temp, scd30_hum);
             }
 
             if (scd41)
             {
-                if (take_i2c_mutex("read_scd4x", pdMS_TO_TICKS(1500)))
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "SCD41");
+                bool scd41ReadOk = false;
+                const bool scd41LockTaken = take_i2c_mutex("read_scd4x", pdMS_TO_TICKS(1500));
+                if (scd41LockTaken)
                 {
-                    if (read_scd4x())
+                    scd41ReadOk = read_scd4x();
+                    if (scd41ReadOk)
                     {
                         i2c_note_success();
                     }
@@ -1912,47 +1628,70 @@ void loop_monitoring(void *pvParameters)
                     give_i2c_mutex();
                 }
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "SCD41",
+                              !scd41LockTaken ? "LOCK_TIMEOUT" : (scd41ReadOk ? "OK" : "NOT_READY_OR_ERROR"));
+                FW_SAMPLE_VALUES(cycleNumber, "SCD41", "co2=%u temp=%.2f hum=%.2f",
+                                 static_cast<unsigned>(scd41_co2), scd41_temp, scd41_hum);
             }
 
             if (gas)
             {
-                if (take_i2c_mutex("read_multigas", pdMS_TO_TICKS(300))) //(3000) //Rami - 09 07 26
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "MULTIGAS");
+                const bool gasLockTaken = take_i2c_mutex("read_multigas", pdMS_TO_TICKS(300)); //(3000) //Rami - 09 07 26
+                if (gasLockTaken)
                 {
                     read_multigas();
                     give_i2c_mutex();
                 }
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "MULTIGAS", gasLockTaken ? "OK" : "LOCK_TIMEOUT");
+                FW_SAMPLE_VALUES(cycleNumber, "MULTIGAS", "no2=%.3f co=%.3f voc=%.3f c2h5oh=%.3f",
+                                 no2, co, voc, c2h5oh);
             }
 
             if (co_hd)
             {
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "CO_HD");
                 read_co_hd();
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "CO_HD", co_hd ? "OK" : "ERROR");
+                FW_SAMPLE_VALUES(cycleNumber, "CO_HD", "ppm=%.3f", co_hd_ppm);
             }
 
             if (no2_hd)
             {
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "NO2_HD");
                 read_no2_hd();
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "NO2_HD", no2_hd ? "OK" : "ERROR");
+                FW_SAMPLE_VALUES(cycleNumber, "NO2_HD", "ppm=%.3f", no2_hd_ppm);
             }
 
             if (o3_hd)
             {
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "O3_HD");
                 read_o3_hd();
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "O3_HD", o3_hd ? "OK" : "ERROR");
+                FW_SAMPLE_VALUES(cycleNumber, "O3_HD", "ppm=%.4f", o3_hd_ppm);
             }
 
             if (so2_hd)
             {
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "SO2_HD");
                 read_so2_hd();
                 i2c_bus_settle();
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, "SO2_HD", so2_hd ? "OK" : "ERROR");
+                FW_SAMPLE_VALUES(cycleNumber, "SO2_HD", "ppm=%.3f", so2_hd_ppm);
             }
 
             // Gestione catena sensori polveri
             if (sps)
             {
+                FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, sen55 ? "SEN55/SPS30" : "SPS30");
                 bool dustReadOk = false;
                 bool i2cDustReadAttempted = false;
+                bool pmsFallbackUsed = false;
                 if (take_i2c_mutex("read_sps30_sen55", pdMS_TO_TICKS(3000)))
                 {
                     i2cDustReadAttempted = true;
@@ -1977,13 +1716,20 @@ void loop_monitoring(void *pvParameters)
                 if ((!i2cDustReadAttempted || !dustReadOk) && pmsa003)
                 {
                     read_pmsA003();
+                    pmsFallbackUsed = true;
                 }
+                FW_SAMPLE_END(sampleStartedMs, cycleNumber, sen55 ? "SEN55/SPS30" : "SPS30",
+                              dustReadOk ? "OK" : (pmsFallbackUsed ? "FALLBACK_PMS" : "ERROR"));
+                FW_SAMPLE_VALUES(cycleNumber, sen55 ? "SEN55/SPS30" : "SPS30",
+                                 "pm1=%.2f pm2_5=%.2f pm10=%.2f", pmAe1_0, pmAe2_5, pmAe10_0);
             }
             else
             {
                 if (sen55)
                 {
+                    FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "SEN55");
                     bool sen55Ok = false;
+                    bool pmsFallbackUsed = false;
                     if (take_i2c_mutex("read_sen55", pdMS_TO_TICKS(2500)))
                     {
                         sen55Ok = read_sen55();
@@ -2003,15 +1749,25 @@ void loop_monitoring(void *pvParameters)
                         if (pmsa003)
                         {
                             read_pmsA003();
+                            pmsFallbackUsed = true;
                         }
                     }
+                    FW_SAMPLE_END(sampleStartedMs, cycleNumber, "SEN55",
+                                  sen55Ok ? "OK" : (pmsFallbackUsed ? "FALLBACK_PMS" : "ERROR"));
+                    FW_SAMPLE_VALUES(cycleNumber, "SEN55",
+                                     "pm1=%.2f pm2_5=%.2f pm10=%.2f temp=%.2f hum=%.2f voc_index=%.2f nox_index=%.2f",
+                                     pmAe1_0, pmAe2_5, pmAe10_0, sen55_temp, sen55_hum, voc_index, no2_index);
                 }
                 else
                 {
                     if (pmsa003)
                     {
+                        FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "PMSA003");
                         read_pmsA003();
                         vTaskDelay(pdMS_TO_TICKS(2500));
+                        FW_SAMPLE_END(sampleStartedMs, cycleNumber, "PMSA003", "OK");
+                        FW_SAMPLE_VALUES(cycleNumber, "PMSA003", "pm1=%.2f pm2_5=%.2f pm10=%.2f",
+                                         pmAe1_0, pmAe2_5, pmAe10_0);
                     }
                 }
             }
@@ -2033,27 +1789,39 @@ void loop_monitoring(void *pvParameters)
 
         if (ane)
         {
+            FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "ANEMOMETER");
             read_anemometer();
             vTaskDelay(pdMS_TO_TICKS(100));
+            FW_SAMPLE_END(sampleStartedMs, cycleNumber, "ANEMOMETER", "OK");
+            FW_SAMPLE_VALUES(cycleNumber, "ANEMOMETER",
+                             "temp=%.2f hum=%.2f pressure=%.2f wind_dir=%d wind_speed=%.2f",
+                             temperature_ane, humidity_ane, pressure_ane, windDirection_ane, windSpeed_ane);
         }
 
         if (soil)
         {
+            FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "SOIL");
             read_soil_moisture();
             vTaskDelay(pdMS_TO_TICKS(100));
+            FW_SAMPLE_END(sampleStartedMs, cycleNumber, "SOIL", "OK");
+            FW_SAMPLE_VALUES(cycleNumber, "SOIL",
+                             "ph=%.2f temp=%.2f hum=%.2f cond=%d n=%.2f p=%.2f k=%.2f",
+                             soil_ph, soil_temperature, soil_humidity, soil_conductivity,
+                             soil_nitrogen, soil_phosphorus, soil_potassium);
         }
 
         // === LETTURA LUXOMETER - SEMPRE ESEGUITA ANCHE IN CICLI SKIP ===
         // Il luxometer è a basso consumo, conviene leggerlo in ogni ciclo
         if (lux)
         {
-            float lux_val = -1.0f;
-            if (take_i2c_mutex("read_luxometer", pdMS_TO_TICKS(1000)))
+            FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "BH1750");
+            const bool luxLockTaken = take_i2c_mutex("read_luxometer", pdMS_TO_TICKS(1000));
+            if (luxLockTaken)
             {
-                lux_val = lightMeter.readLightLevel();
+                cycleLuxValue = lightMeter.readLightLevel();
                 give_i2c_mutex();
             }
-            if (lux_val > 0 && lux_val < 100000.0)
+            if (cycleLuxValue > 0 && cycleLuxValue < 100000.0)
             {
                 // Luxometer correttamente letto
             }
@@ -2062,6 +1830,10 @@ void loop_monitoring(void *pvParameters)
                 // Lettura anomala - potrebbe essere disconnesso
             }
             vTaskDelay(pdMS_TO_TICKS(100));
+            const bool luxValid = cycleLuxValue > 0 && cycleLuxValue < 100000.0f;
+            FW_SAMPLE_END(sampleStartedMs, cycleNumber, "BH1750",
+                          !luxLockTaken ? "LOCK_TIMEOUT" : (luxValid ? "OK" : "INVALID"));
+            FW_SAMPLE_VALUES(cycleNumber, "BH1750", "lux=%.2f", cycleLuxValue);
         }
 
         // === LETTURA TIMESTAMP (dal server con gerarchia di sincronizzazione) ===
@@ -2083,19 +1855,15 @@ void loop_monitoring(void *pvParameters)
             doc["lon"] = longitude;
             doc["siv"] = SIV;
         }
+        FW_SAMPLE_VALUES(cycleNumber, "GPS", "active=%d lat=%.6f lon=%.6f siv=%d",
+                         GPSsensor, latitude, longitude, SIV);
 
         // Popola sensori nel JSON
         if (lux)
         {
-            float lux_val = -1.0f;
-            if (take_i2c_mutex("json_luxometer", pdMS_TO_TICKS(1000)))
+            if (cycleLuxValue > 0)
             {
-                lux_val = lightMeter.readLightLevel();
-                give_i2c_mutex();
-            }
-            if (lux_val > 0)
-            {
-                doc["luminosita"] = lux_val;
+                doc["luminosita"] = cycleLuxValue;
             }
         }
 
@@ -2125,18 +1893,25 @@ void loop_monitoring(void *pvParameters)
 
         if (sht)
         {
+            FW_SAMPLE_BEGIN(sampleStartedMs, cycleNumber, "SHT21");
             float temp = NAN;
             float hum = NAN;
-            if (take_i2c_mutex("read_sht21", pdMS_TO_TICKS(1000)))
+            const bool shtLockTaken = take_i2c_mutex("read_sht21", pdMS_TO_TICKS(1000));
+            if (shtLockTaken)
             {
                 temp = sht21.getTemperature();
                 hum = sht21.getHumidity();
                 give_i2c_mutex();
             }
-            if (temp > -20 && temp < 100)
+            const bool tempValid = temp > -20 && temp < 100;
+            const bool humValid = hum > 10 && hum < 101;
+            if (tempValid)
                 doc["temperatura"] = temp;
-            if (hum > 10 && hum < 101)
+            if (humValid)
                 doc["umidita"] = hum;
+            FW_SAMPLE_END(sampleStartedMs, cycleNumber, "SHT21",
+                          !shtLockTaken ? "LOCK_TIMEOUT" : ((tempValid || humValid) ? "OK" : "INVALID"));
+            FW_SAMPLE_VALUES(cycleNumber, "SHT21", "temp=%.2f hum=%.2f", temp, hum);
         }
 
         if (scd30)
@@ -2277,13 +2052,10 @@ void loop_monitoring(void *pvParameters)
         }
 
         // Calcola conteggio dispositivi escludendo quelli fissi (come nel main_old.cpp)
-        if (sniffer)
         {
             uint32_t now = millis();
             int totalRegistered = 0;
             int fixedCount = 0;
-            int activeCount = 0;
-            uint64_t sumDwellMs = 0;
 
             portENTER_CRITICAL(&devicesMux);
             int cnt = devicesCount;
@@ -2328,29 +2100,34 @@ void loop_monitoring(void *pvParameters)
                 }
                 if ((now - tmp.lastSeen) <= ACTIVE_WINDOW_MS)
                 {
-                    activeCount++;
-                    sumDwellMs += totalSeenMs;
                 }
             }
 
             // Calcolo finale: escludi dispositivi fissi (70%) e applica coefficiente moltiplicatore
-            int devicesAfterFilter = (int)(totalRegistered - (int)(fixedCount));
-            num_devices_sniffed = (int)(devicesAfterFilter * SNIFFER_DEVICE_MULTIPLIER);
+            num_devices_sniffed = adjusted_mobile_device_count(totalRegistered, fixedCount,
+                                                                SNIFFER_DEVICE_MULTIPLIER);
         }
 
         doc["num_devices_sniffed"] = num_devices_sniffed;
 
         // Verifica pollutant mancanti
-        for (String pollutant : Pollutants)
+        for (size_t i = 0; i < Pollutants.size(); ++i)
         {
+            const char *pollutant = Pollutants[i];
             if (!doc[pollutant].is<JsonVariant>())
             {
                 PollutantsMissing.push_back(pollutant);
             }
         }
 
-        String pollutantMissing = vector_to_encoded_json_array(PollutantsMissing);
+        String pollutantMissing = pollutant_mask_to_encoded_json_array(PollutantsMissing);
         bool forcedOffline = (low && isOfflineCycle); // In LOW POWER cicli 0-4: SEMPRE offline anche se connessi
+        sampledFieldCount = doc.size();
+#if FW_LOG_LEVEL >= 3
+        serializeJson(doc, jsonOutput, sizeof(jsonOutput));
+        Serial.printf("DEBUG: [CYCLE] id=%lu JSON=%s\n",
+                      static_cast<unsigned long>(cycleNumber), jsonOutput);
+#endif
         bool needWifiAfterExtraction = conf && !forcedOffline;
         if (wifiPausedForExtraction && needWifiAfterExtraction)
         {
@@ -2415,6 +2192,7 @@ void loop_monitoring(void *pvParameters)
             }
             serializeJson(doc, jsonOutput);
             write_file_data(jsonOutput);
+            cycleTransport = "STORAGE";
 
             doc.clear();
             info.clear();
@@ -2452,6 +2230,11 @@ void loop_monitoring(void *pvParameters)
                     Serial.println("ERROR: MQTT fallito, salvataggio fallback");
                     serializeJson(doc, jsonOutput);
                     write_file_data(jsonOutput);
+                    cycleTransport = "STORAGE_FALLBACK";
+                }
+                else
+                {
+                    cycleTransport = "MQTT";
                 }
             }
             else
@@ -2459,6 +2242,7 @@ void loop_monitoring(void *pvParameters)
                 Serial.println("DEBUG: Ciclo skip MQTT send - salvataggio locale");
                 serializeJson(doc, jsonOutput);
                 write_file_data(jsonOutput);
+                cycleTransport = "STORAGE";
             }
 
             doc.clear();
@@ -2577,6 +2361,8 @@ void loop_monitoring(void *pvParameters)
                 esp_sleep_enable_timer_wakeup(sleepDurationUs);
 
                 Serial.println("DEBUG: Entering deep sleep...");
+                log_cycle_summary(cycleNumber, cyclePhase, cycleTransport, sampledFieldCount, cycleStartMs);
+                cycleSummaryLogged = true;
                 Serial.flush();
                 delay(100); // Attendi flush seriale
 
@@ -2586,13 +2372,6 @@ void loop_monitoring(void *pvParameters)
         }
 
         // Reboot se richiesto da MQTT
-        if (pendingSnifferReboot)
-        {
-
-            vTaskDelay(pdMS_TO_TICKS(200));
-            ESP.restart();
-        }
-
         // Incrementa ciclo
         resetCount++;
         // Nessun reset - i cicli continuano indefinitamente alternando OFFLINE/ONLINE
@@ -2613,10 +2392,20 @@ void loop_monitoring(void *pvParameters)
         if (resetCount % 10 == 0)
         {
             Serial.printf("DEBUG: Free heap: %d bytes\n", ESP.getFreeHeap());
+#if FW_LOG_LEVEL >= 3
+            Serial.printf("DEBUG: Stack watermark monitor=%u watchdog=%u gps=%u bytes\n",
+                          static_cast<unsigned>(uxTaskGetStackHighWaterMark(NULL)),
+                          static_cast<unsigned>(uxTaskGetStackHighWaterMark(Task0_handle)),
+                          static_cast<unsigned>(uxTaskGetStackHighWaterMark(Task2_handle)));
+#endif
         }
 
         // === TIMEOUT ASSOLUTO CICLO: Previene blocchi infiniti ===
         unsigned long cycleElapsed = millis() - cycleStartMs;
+        if (!cycleSummaryLogged)
+        {
+            log_cycle_summary(cycleNumber, cyclePhase, cycleTransport, sampledFieldCount, cycleStartMs);
+        }
         if (cycleElapsed > cycleTimeoutMs)
         {
             Serial.printf("WARNING: ⚠️ CICLO TIMEOUT: %lu ms > %lu ms - REBOOT FORZATO\n",
@@ -2630,8 +2419,6 @@ void loop_monitoring(void *pvParameters)
 
         // Traccia timing
         debugTs.lastMonitorMs = millis() - debugTs.monitorStartMs;
-        unsigned long snifferElapsed = millis() - snifferStartTime;
-
         // Sniffer devices processed
 
         // Brief yield
@@ -2656,9 +2443,9 @@ void loop_sniffer(void *pvParameters)
 
     // Attende durata sweep
     unsigned long t0 = millis();
-    unsigned long SWEEP_DURATION_MS = 30000; // 30 secondi
+    const unsigned long sweepDurationMs = 30000; // 30 secondi
 
-    while (millis() - t0 < SWEEP_DURATION_MS)
+    while (millis() - t0 < sweepDurationMs)
     {
         // Reset watchdog durante sweep
         esp_task_wdt_reset();
@@ -2805,6 +2592,7 @@ void create_access_point()
         if (n >= 0) {
             // Scansione completata, costruisci JSON
 
+            jsonWifi.reserve(2 + static_cast<size_t>(n) * 64U);
             jsonWifi = "[";
             for (int i = 0; i < n; i++) {
                 if (i > 0) jsonWifi += ",";
@@ -3395,10 +3183,18 @@ bool check_anemometer()
     AnemometerData anemData = sensors.readAnemometer(9600);
     return anemData.valid;
 }
-void init_spiffs()
+bool init_spiffs()
 {
-    if (!SPIFFS.begin())
-        SPIFFS.begin(true);
+    spiffsReady = SPIFFS.begin(true);
+    if (spiffsReady)
+    {
+        Serial.println("[STORAGE] SPIFFS mounted");
+    }
+    else
+    {
+        Serial.println("ERROR: [STORAGE] SPIFFS unavailable; operations disabled until reboot");
+    }
+    return spiffsReady;
 }
 
 void init_rtc()
@@ -3520,6 +3316,7 @@ bool init_scd4x()
     return (scd4x.startPeriodicMeasurement() == 0);
 }
 
+#if ENABLE_MICS4514
 bool init_mics()
 {
     if (!mics.begin())
@@ -3531,6 +3328,7 @@ bool init_mics()
         vTaskDelay(pdMS_TO_TICKS(1000));
     return true;
 }
+#endif
 
 bool init_gps()
 {
@@ -3598,7 +3396,7 @@ void scan_i2c_devices()
     const unsigned long SCAN_TIMEOUT = 10000; // Max 10 secondi
 
     // Reset mappa sensori
-    memset(&sensorPresence, 0, sizeof(sensorPresence));
+    sensorPresence = I2CSensorPresence{};
 
     for (byte address = 1; address < 127; address++)
     {
@@ -3712,8 +3510,6 @@ void scan_i2c_devices()
         // Piccolo delay per dare tempo al bus di recuperare
         vTaskDelay(pdMS_TO_TICKS(3));
     }
-
-    unsigned long scanDuration = millis() - scanStart;
 
     if (nDevices == 0)
     {
@@ -3834,8 +3630,8 @@ bool init_luxometer()
     }
     if (lightMeter.begin())
     {
-        float lux = lightMeter.readLightLevel();
-        if (lux >= 0.0 && lux < 100000.0)
+        const float measuredLux = lightMeter.readLightLevel();
+        if (measuredLux >= 0.0 && measuredLux < 100000.0)
         {
 
             return true;
@@ -3851,9 +3647,9 @@ bool init_luxometer()
 
 int16_t read_ozone()
 {
-    int16_t ozone = Ozone.readOzoneData(COLLECT_NUMBER);
+    const int16_t ozoneValue = Ozone.readOzoneData(COLLECT_NUMBER);
     vTaskDelay(pdMS_TO_TICKS(1000));
-    return ozone;
+    return ozoneValue;
 }
 
 // void read_multigas()
@@ -4291,6 +4087,7 @@ bool read_scd4x()
     return true;
 }
 
+#if ENABLE_MICS4514
 float read_mics(uint8_t gasTypes, const char *gasNames)
 {
     float gasConcentration = mics.getGasData(gasTypes);
@@ -4310,6 +4107,7 @@ float read_mics(uint8_t gasTypes, const char *gasNames)
     // MICS data read
     return gasConcentration;
 }
+#endif
 
 void print_sps30_values(float pm1, float pm2, float pm10)
 {
@@ -4363,8 +4161,15 @@ bool check_soil_moisture()
 // SEZIONE 15: GESTIONE FILE E STORAGE
 // ============================================================================
 
+static bool storage_available(fs::FS &fs)
+{
+    return (&fs != static_cast<fs::FS *>(&SPIFFS)) || spiffsReady;
+}
+
 String read_file_storage(fs::FS &fs, const char *path)
 {
+    if (!storage_available(fs))
+        return "";
 
     File file = fs.open(path);
     if (!file || file.isDirectory())
@@ -4381,6 +4186,9 @@ String read_file_storage(fs::FS &fs, const char *path)
 
 bool write_file_storage(fs::FS &fs, const char *path, const char *message)
 {
+    if (!storage_available(fs))
+        return false;
+
     vTaskDelay(pdMS_TO_TICKS(1000));
 
     File file = fs.open(path, FILE_WRITE);
@@ -4396,6 +4204,9 @@ bool write_file_storage(fs::FS &fs, const char *path, const char *message)
 
 void delete_file_storage(fs::FS &fs, const char *path)
 {
+    if (!storage_available(fs))
+        return;
+
     if (fs.remove(path))
     {
         Serial.printf("[INFO] File deleted: %s\n", path);
@@ -4408,7 +4219,12 @@ void delete_file_storage(fs::FS &fs, const char *path)
 
 int get_count_data_saved(fs::FS &fs)
 {
+    if (!storage_available(fs))
+        return 0;
+
     File dir = fs.open("/");
+    if (!dir)
+        return 0;
     int count = 0;
     File f;
     while ((f = dir.openNextFile()))
@@ -4422,6 +4238,9 @@ int get_count_data_saved(fs::FS &fs)
 
 void send_data_from_storage(fs::FS &fs)
 {
+    if (!storage_available(fs))
+        return;
+
     File dir = fs.open("/");
     int totalFiles = get_count_data_saved(fs);
     int sentCount = 0;
@@ -4672,126 +4491,89 @@ void delete_message_received_mqtt()
  * @param topic Topic del messaggio
  * @param payload Contenuto del messaggio
  */
-void read_message_received_mqtt(String &topic, String &payload)
+void read_message_received_mqtt(String &receivedTopic, String &payload)
 {
-    Serial.printf("DEBUG: Ricevuto: %s = %s\n", topic.c_str(), payload.c_str());
+    Serial.printf("DEBUG: Ricevuto: %s = %s\n", receivedTopic.c_str(), payload.c_str());
 
     if (payload.length() > 1)
     {
         arrived = true;
     }
 
-    // Comandi relay singoli (formato: on/of/on2/of2)
-    if (payload.length() == 2)
-    {
-        if (payload.equals("on"))
-        {
-            digitalWrite(RELAY1_PIN, HIGH);
-            relay1 = true;
-            write_relay1_eeprom(true);
-            Serial.println("[RELAY] Relay1 ON - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-        if (payload.equals("of"))
-        {
-            digitalWrite(RELAY1_PIN, LOW);
-            relay1 = false;
-            write_relay1_eeprom(false);
-            Serial.println("[RELAY] Relay1 OFF - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-    }
-    else if (payload.length() == 3)
-    {
-        if (payload.equals("on2"))
-        {
-            digitalWrite(RELAY2_PIN, HIGH);
-            relay2 = true;
-            write_relay2_eeprom(true);
-            Serial.println("[RELAY] Relay2 ON - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-        if (payload.equals("of2"))
-        {
-            digitalWrite(RELAY2_PIN, LOW);
-            relay2 = false;
-            write_relay2_eeprom(false);
-            Serial.println("[RELAY] Relay2 OFF - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-    }
+    const MqttCommand command = parse_mqtt_command(payload.c_str());
+    bool relay1Changed = false;
+    bool relay2Changed = false;
 
-    // Comandi relay doppi (formato: onon/ofof/onof/ofon)
-    else if (payload.length() == 4)
+    switch (command)
     {
-        if (payload.equals("onon"))
-        {
-            digitalWrite(RELAY1_PIN, HIGH);
-            digitalWrite(RELAY2_PIN, HIGH);
-            relay1 = true;
-            relay2 = true;
-            write_relay1_eeprom(true);
-            write_relay2_eeprom(true);
-            Serial.println("[RELAY] Relay1 ON, Relay2 ON - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-        else if (payload.equals("ofof"))
-        {
-            digitalWrite(RELAY1_PIN, LOW);
-            digitalWrite(RELAY2_PIN, LOW);
-            relay1 = false;
-            relay2 = false;
-            write_relay1_eeprom(false);
-            write_relay2_eeprom(false);
-            Serial.println("[RELAY] Relay1 OFF, Relay2 OFF - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-        else if (payload.equals("onof"))
-        {
-            digitalWrite(RELAY1_PIN, HIGH);
-            digitalWrite(RELAY2_PIN, LOW);
-            relay1 = true;
-            relay2 = false;
-            write_relay1_eeprom(true);
-            write_relay2_eeprom(false);
-            Serial.println("[RELAY] Relay1 ON, Relay2 OFF - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-        else if (payload.equals("ofon"))
-        {
-            digitalWrite(RELAY1_PIN, LOW);
-            digitalWrite(RELAY2_PIN, HIGH);
-            relay1 = false;
-            relay2 = true;
-            write_relay1_eeprom(false);
-            write_relay2_eeprom(true);
-            Serial.println("[RELAY] Relay1 OFF, Relay2 ON - Stato salvato in EEPROM");
-            send_sensors_diagnostics(); // Aggiorna diagnostica in tempo reale
-        }
-        // Comando low consumption (formato: low0 o low1)
-        else if (payload.startsWith("low"))
-        {
-            int op1 = payload.substring(3, 4).toInt();
-            if (op1 == 1)
-            {
-
-                write_low_eeprom(true);
-            }
-            else if (op1 == 0)
-            {
-
-                write_low_eeprom(false);
-            }
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            arrivedlow = true;
-        }
-    }
-
-    // Reset
-    if (payload.equals("reset"))
-    {
+    case MqttCommand::RELAY1_ON:
+        relay1 = true;
+        relay1Changed = true;
+        break;
+    case MqttCommand::RELAY1_OFF:
+        relay1 = false;
+        relay1Changed = true;
+        break;
+    case MqttCommand::RELAY2_ON:
+        relay2 = true;
+        relay2Changed = true;
+        break;
+    case MqttCommand::RELAY2_OFF:
+        relay2 = false;
+        relay2Changed = true;
+        break;
+    case MqttCommand::BOTH_ON:
+        relay1 = true;
+        relay2 = true;
+        relay1Changed = relay2Changed = true;
+        break;
+    case MqttCommand::BOTH_OFF:
+        relay1 = false;
+        relay2 = false;
+        relay1Changed = relay2Changed = true;
+        break;
+    case MqttCommand::RELAY1_ON_RELAY2_OFF:
+        relay1 = true;
+        relay2 = false;
+        relay1Changed = relay2Changed = true;
+        break;
+    case MqttCommand::RELAY1_OFF_RELAY2_ON:
+        relay1 = false;
+        relay2 = true;
+        relay1Changed = relay2Changed = true;
+        break;
+    case MqttCommand::LOW_POWER_ON:
+        write_low_eeprom(true);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        arrivedlow = true;
+        break;
+    case MqttCommand::LOW_POWER_OFF:
+        write_low_eeprom(false);
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        arrivedlow = true;
+        break;
+    case MqttCommand::RESET:
         daresettare = true;
         Serial.println("WARNING: Reset richiesto");
+        break;
+    case MqttCommand::NONE:
+        break;
+    }
+
+    if (relay1Changed)
+    {
+        digitalWrite(RELAY1_PIN, relay1 ? HIGH : LOW);
+        write_relay1_eeprom(relay1);
+    }
+    if (relay2Changed)
+    {
+        digitalWrite(RELAY2_PIN, relay2 ? HIGH : LOW);
+        write_relay2_eeprom(relay2);
+    }
+    if (relay1Changed || relay2Changed)
+    {
+        Serial.printf("[RELAY] Relay1=%d Relay2=%d - Stato salvato in EEPROM\n", relay1, relay2);
+        send_sensors_diagnostics();
     }
 }
 
@@ -4829,6 +4611,41 @@ void init_mqtt()
 // SEZIONE 17: FUNZIONI OTA E AGGIORNAMENTO
 // ============================================================================
 
+static void make_http_body_preview(const String &body, char *preview, size_t previewSize)
+{
+    if (preview == nullptr || previewSize == 0)
+        return;
+
+    const size_t copyLength = min(body.length(), previewSize - 1U);
+    memcpy(preview, body.c_str(), copyLength);
+    preview[copyLength] = '\0';
+}
+
+static bool persist_ota_firmware_name(const String &newFirmwareName)
+{
+    if (!firmware_name_fits_storage(newFirmwareName.c_str()))
+    {
+        Serial.printf("ERROR: [OTA] Firmware name invalid/too long (%u/%u): %s\n",
+                      static_cast<unsigned>(newFirmwareName.length()),
+                      static_cast<unsigned>(EEPROM_ADDR::VERSION_MAX_LENGTH),
+                      newFirmwareName.c_str());
+        return false;
+    }
+
+    eeprom_write_string(newFirmwareName, EEPROM_ADDR::VERSION_OFFSET, "VERSION");
+    const String storedName = eeprom_read_string(EEPROM_ADDR::VERSION_OFFSET);
+    if (storedName != newFirmwareName)
+    {
+        Serial.printf("CRITICAL: [OTA] Firmware name EEPROM verification failed: expected=%s stored=%s\n",
+                      newFirmwareName.c_str(), storedName.c_str());
+        return false;
+    }
+
+    nameBinESP = newFirmwareName;
+    Serial.printf("[OTA] Firmware name saved in EEPROM: %s\n", nameBinESP.c_str());
+    return true;
+}
+
 /**
  * Verifica se è disponibile un aggiornamento OTA dal server
  */
@@ -4847,28 +4664,31 @@ void check_update_OTA()
     String response = "";
     const String resource = "/versione_firmware?ID=" + topic;
 
-    WiFiClient clientWifi;
-    HttpClient httpWifi(clientWifi, host, port);
+    WiFiClient otaHttpClient;
+    HttpClient httpWifi(otaHttpClient, host, port);
 
     int err = httpWifi.get(resource);
     if (err != 0)
     {
-        Serial.println("ERROR: Errore richiesta versione HTTP");
+        Serial.printf("ERROR: [HTTP][OTA] GET /versione_firmware client_error=%d\n", err);
         return;
     }
 
     int status = httpWifi.responseStatusCode();
-    Serial.print("[OTA] Server response status: ");
-    Serial.println(status);
+    response = httpWifi.responseBody();
+    char responsePreview[257];
+    make_http_body_preview(response, responsePreview, sizeof(responsePreview));
 
     if (status == 200)
     {
-        response = httpWifi.responseBody();
-        Serial.println("[OTA] Server response: " + response);
+        Serial.printf("[HTTP][OTA] GET /versione_firmware status=200\n");
+        Serial.printf("DEBUG: [HTTP][OTA] response=%s\n",
+                      responsePreview[0] ? responsePreview : "<empty>");
     }
     else
     {
-        Serial.println("ERROR: Errore risposta server (non 200)");
+        Serial.printf("ERROR: [HTTP][OTA] GET /versione_firmware status=%d body=%s\n",
+                      status, responsePreview[0] ? responsePreview : "<empty>");
         return;
     }
 
@@ -4879,6 +4699,15 @@ void check_update_OTA()
     if (!serverVersion.length())
     {
         Serial.println("DEBUG: Versione server vuota - nessun aggiornamento disponibile");
+        return;
+    }
+
+    if (!firmware_name_fits_storage(serverVersion.c_str()))
+    {
+        Serial.printf("ERROR: [OTA] Server firmware name invalid/too long (%u/%u): %s\n",
+                      static_cast<unsigned>(serverVersion.length()),
+                      static_cast<unsigned>(EEPROM_ADDR::VERSION_MAX_LENGTH),
+                      serverVersion.c_str());
         return;
     }
 
@@ -4926,9 +4755,11 @@ void check_update_OTA()
             {
                 if (line.indexOf("200") < 0)
                 {
-                    Serial.println("ERROR: Errore HTTP download (non 200)");
+                    Serial.printf("ERROR: [HTTP][OTA] GET /aggiornamento_firmware status_line=%s\n",
+                                  line.c_str());
                     return;
                 }
+                Serial.println("[HTTP][OTA] GET /aggiornamento_firmware status=200");
             }
 
             if (line.startsWith("Content-Length: "))
@@ -4939,7 +4770,7 @@ void check_update_OTA()
         }
 
         // Procedi al download
-        exec_update_OTA();
+        exec_update_OTA(serverVersion);
     }
     else
     {
@@ -4950,7 +4781,7 @@ void check_update_OTA()
 /**
  * Esegue aggiornamento OTA
  */
-void exec_update_OTA()
+void exec_update_OTA(const String &newFirmwareName)
 {
     Serial.println("[OTA] Starting firmware download...");
 
@@ -5019,6 +4850,11 @@ void exec_update_OTA()
     {
         if (Update.isFinished())
         {
+            if (!persist_ota_firmware_name(newFirmwareName))
+            {
+                Serial.println("CRITICAL: [OTA] Update written but reboot blocked: firmware name not persisted");
+                return;
+            }
             Serial.println("[OTA] Update successful - restarting...");
             vTaskDelay(pdMS_TO_TICKS(1000));
             ESP.restart();
@@ -5188,33 +5024,48 @@ int get_epoch()
     String response = "";
     const char resource[] = "/epoch";
     const unsigned long TIMEOUT_MS = 5000; // 5 secondi timeout
+    TemporaryWifiState wifiState;
 
-    WiFiClient clientWifi;
-    HttpClient httpWifi(clientWifi, host, port);
-    httpWifi.setHttpResponseTimeout(TIMEOUT_MS);
-
-    int err = httpWifi.get(resource);
-    if (err != 0)
+    if (!begin_temporary_wifi(wifiState, "EPOCH"))
     {
-        Serial.printf("[EPOCH] ✗ Errore connessione server: %d\n", err);
+        end_temporary_wifi(wifiState, "EPOCH");
         return 0;
     }
 
-    int status = httpWifi.responseStatusCode();
+    int epochResult = 0;
 
-    if (status == 200)
     {
-        response = httpWifi.responseBody();
-        unsigned long epochVal = response.toInt();
-        Serial.printf("[EPOCH] ✓ Response status code: 200\n");
-        Serial.printf("[EPOCH] ✓ Server response: %lu\n", epochVal);
-        return epochVal;
+        WiFiClient epochHttpClient;
+        HttpClient httpWifi(epochHttpClient, host, port);
+        httpWifi.setHttpResponseTimeout(TIMEOUT_MS);
+
+        int err = httpWifi.get(resource);
+        if (err != 0)
+        {
+            Serial.printf("ERROR: [HTTP][TIME] GET /epoch client_error=%d\n", err);
+        }
+        else
+        {
+            int status = httpWifi.responseStatusCode();
+            response = httpWifi.responseBody();
+            char responsePreview[257];
+            make_http_body_preview(response, responsePreview, sizeof(responsePreview));
+
+            if (status == 200)
+            {
+                epochResult = response.toInt();
+                Serial.printf("[HTTP][TIME] GET /epoch status=200 epoch=%d\n", epochResult);
+            }
+            else
+            {
+                Serial.printf("ERROR: [HTTP][TIME] GET /epoch status=%d body=%s\n",
+                              status, responsePreview[0] ? responsePreview : "<empty>");
+            }
+        }
     }
-    else
-    {
-        Serial.printf("[EPOCH] ✗ Errore HTTP %d\n", status);
-        return 0;
-    }
+
+    end_temporary_wifi(wifiState, "EPOCH");
+    return epochResult;
 }
 
 /**
@@ -5227,7 +5078,14 @@ unsigned long get_epoch_ntp_server()
     const unsigned long TIMEOUT_WAIT = 2000;    // Attesa iniziale
     const unsigned long TIMEOUT_RETRY = 100;    // Timeout tra retry
     const int MAX_RETRIES = 20;                 // Numero massimo di retry
-    const unsigned long TIMEZONE_OFFSET = 3600; // +1 ora CET/CEST
+    const unsigned long TIMEZONE_OFFSET = 0; // +1 ora CET/CEST
+    TemporaryWifiState wifiState;
+
+    if (!begin_temporary_wifi(wifiState, "NTP"))
+    {
+        end_temporary_wifi(wifiState, "NTP");
+        return 0;
+    }
 
     Serial.printf("[TIME] Tentativo NTP con server: %s\n", ntpServer);
 
@@ -5248,6 +5106,7 @@ unsigned long get_epoch_ntp_server()
     {
         Serial.println("[TIME] Timeout sincronizzazione NTP");
         Serial.printf("[TIME] ✗ NTP non disponibile (retry: %d/%d)\n", retries, MAX_RETRIES);
+        end_temporary_wifi(wifiState, "NTP");
         return 0;
     }
 
@@ -5256,6 +5115,7 @@ unsigned long get_epoch_ntp_server()
    unsigned long epochWithOffset = (unsigned long)now;    
    Serial.printf("[TIME] NTP sincronizzato: %lu + %lu = %lu\n", (unsigned long)now, TIMEZONE_OFFSET, epochWithOffset);
 
+    end_temporary_wifi(wifiState, "NTP");
     return epochWithOffset;
 }
 
@@ -5286,35 +5146,28 @@ unsigned long get_time_with_hierarchy()
     // Check se WiFi è online e server è raggiungibile
     Serial.println("[TIME] 1️⃣  Tentativo SERVER HTTP...");
 
-    if (WiFi.status() == WL_CONNECTED)
+    timestamp = get_epoch();
+    if (timestamp > MIN_VALID_TIMESTAMP)
     {
-        timestamp = get_epoch();
-        if (timestamp > MIN_VALID_TIMESTAMP)
-        {
-            Serial.printf("[TIME] ✓ Ora da SERVER: %lu\n", timestamp);
+        Serial.printf("[TIME] ✓ Ora da SERVER: %lu\n", timestamp);
 
-            // Salva su RTC I2C se disponibile
-            if (rtc_i2c_available())
-            {
-                set_rtc_i2c_time(timestamp);
-                Serial.println("[TIME] → Sincronizzato su RTC I2C");
-            }
-
-            // Salva su file locale
-            char numFile[12];
-            itoa(timestamp, numFile, 10);
-            write_file_storage(SPIFFS, "/e.txt", numFile);
-            Serial.println("[TIME] → Salvo su FILE LOCALE (/e.txt)");
-            return timestamp;
-        }
-        else
+        // Salva su RTC I2C se disponibile
+        if (rtc_i2c_available())
         {
-            Serial.println("[TIME] ✗ SERVER HTTP non disponibile o timeout");
+            set_rtc_i2c_time(timestamp);
+            Serial.println("[TIME] → Sincronizzato su RTC I2C");
         }
+
+        // Salva su file locale
+        char numFile[12];
+        itoa(timestamp, numFile, 10);
+        write_file_storage(SPIFFS, "/e.txt", numFile);
+        Serial.println("[TIME] → Salvo su FILE LOCALE (/e.txt)");
+        return timestamp;
     }
     else
     {
-        Serial.println("[TIME] ✗ WiFi non connesso - skip SERVER");
+        Serial.println("[TIME] ✗ SERVER HTTP non disponibile o timeout");
     }
 
     // 2️⃣ PRIORITÀ 2: NTP (Network Time Protocol)
@@ -5644,171 +5497,7 @@ void check_vergin_eeprom()
 // SEZIONE 20: FUNZIONI UTILITÀ AGGIUNTIVE
 // ============================================================================
 
-/**
- * Legge lista di reti WiFi disponibili
- * Logica semplificata dal main_old.cpp (funzionante)
- * @param forceRefresh Ignorato per compatibilità, sempre fa nuova scansione
- * @return Stringa JSON con le reti trovate
- */
-String get_list_wifi(bool forceRefresh)
-{
-    // Timeout più lungo per pre-scansione (primo avvio), più corto per richieste successive
-    static bool isFirstScan = true;
-    const int MAX_RETRIES = isFirstScan ? 40 : 5; // 40x200ms=8sec per prima, 1sec per successive
-    const int SCAN_TIMEOUT_MS = 200;
-    const int MAX_SCAN_ATTEMPTS = 3; // Numero massimo di tentativi di scansione
 
-    int scanAttempt = 0;
-    int n = -2; // Stato iniziale: nessuna scansione
-
-    // Ritenta la scansione se fallisce
-    while (scanAttempt < MAX_SCAN_ATTEMPTS && n <= 0)
-    {
-        if (scanAttempt > 0)
-        {
-
-            vTaskDelay(pdMS_TO_TICKS(500)); // Pausa tra tentativi
-        }
-
-        // Avvia la scansione se non è già in corso
-        if (WiFi.scanComplete() == -2)
-        {
-
-            WiFi.scanNetworks(true);
-            vTaskDelay(pdMS_TO_TICKS(100)); // Piccolo delay dopo l'avvio
-        }
-        else
-        {
-            Serial.println("DEBUG: Scansione già in corso o risultati disponibili");
-        }
-
-        // Attendi il completamento della scansione con timeout
-        int retry_count = 0;
-        n = WiFi.scanComplete();
-
-        while (n == WIFI_SCAN_RUNNING && retry_count < MAX_RETRIES)
-        {
-            vTaskDelay(pdMS_TO_TICKS(SCAN_TIMEOUT_MS));
-            n = WiFi.scanComplete();
-            retry_count++;
-
-// Reset watchdog per evitare timeout durante scansione lunga (solo se task è attivo)
-#ifdef FW_LOG_ENABLED
-            if (xTaskGetCurrentTaskHandle() != NULL)
-            {
-                esp_task_wdt_reset();
-            }
-#endif
-
-            // Yield per permettere altri task di eseguire (importante per pre-scanning)
-            yield();
-
-            // Progress ogni 5 tentativi
-            if (retry_count % 5 == 0)
-            {
-                Serial.printf("DEBUG: Attesa... (%d/%d)\n", retry_count, MAX_RETRIES);
-            }
-        }
-
-        // Se la scansione è fallita (-2) o è ancora in corso (-1), ritenta
-        if (n == -2)
-        {
-            Serial.println("WARNING: Scansione fallita (stato: -2), pulizia...");
-            WiFi.scanDelete();
-        }
-        else if (n == -1)
-        {
-            Serial.println("WARNING: Timeout scansione (ancora in corso), pulizia...");
-            WiFi.scanDelete();
-        }
-
-        scanAttempt++;
-    }
-
-    // Dopo la prima scansione, usa timeout più brevi
-    if (isFirstScan)
-    {
-        isFirstScan = false;
-    }
-
-    // Se la scansione non è completata o non ha trovato reti
-    if (n <= 0)
-    {
-        Serial.printf("ERROR: Scansione definitivamente fallita dopo %d tentativi (stato: %d)\n", scanAttempt, n);
-        WiFi.scanDelete();
-        return "[]"; // Array JSON vuoto
-    }
-
-    // Costruisci il JSON rimuovendo i duplicati e mantenendo il segnale migliore
-    // Usa un array di struct per memorizzare temporaneamente le reti
-    struct NetworkInfo
-    {
-        String ssid;
-        int rssi;
-    };
-
-    // Filtra duplicati - mantieni solo il segnale più forte per ogni SSID
-    std::vector<NetworkInfo> uniqueNetworks;
-
-    for (int i = 0; i < n; i++)
-    {
-        String ssid = WiFi.SSID(i);
-        int rssi = WiFi.RSSI(i);
-
-        // Salta SSID vuoti
-        if (ssid.isEmpty())
-        {
-            continue;
-        }
-
-        // Cerca se questo SSID esiste già
-        bool found = false;
-        for (auto &net : uniqueNetworks)
-        {
-            if (net.ssid == ssid)
-            {
-                // Aggiorna solo se il segnale è più forte
-                if (rssi > net.rssi)
-                {
-                    net.rssi = rssi;
-                    Serial.printf("DEBUG: SSID duplicato '%s': aggiornato RSSI da %d a %d\n",
-                                  ssid.c_str(), net.rssi, rssi);
-                }
-                found = true;
-                break;
-            }
-        }
-
-        // Se non trovato, aggiungi alla lista
-        if (!found)
-        {
-            uniqueNetworks.push_back({ssid, rssi});
-        }
-    }
-
-    // Costruisci il JSON dalle reti uniche
-    String json = "[";
-
-    for (size_t i = 0; i < uniqueNetworks.size(); i++)
-    {
-        if (i > 0)
-        {
-            json += ",";
-        }
-
-        json += "{";
-        json += "\"ssid\":\"" + uniqueNetworks[i].ssid + "\"";
-        json += ",\"rssi\":" + String(uniqueNetworks[i].rssi);
-        json += "}";
-    }
-
-    json += "]";
-
-    // Pulisci i risultati della scansione
-    WiFi.scanDelete();
-
-    return json;
-}
 
 /**
  * Trova il file .bin più prossimo per OTA da SD
@@ -5868,6 +5557,69 @@ bool find_arduino_devices()
     return false;
 }
 
+static void build_sensors_diagnostics_payload()
+{
+    checkSensor.clear();
+    info.clear();
+
+    saveCounterSD = sd ? get_count_data_saved(SD) : 0;
+    saveCounterSPIFFS = spiffsReady ? get_count_data_saved(SPIFFS) : 0;
+
+    checkSensor["sps"] = sps;
+    checkSensor["ozone"] = ozone;
+    checkSensor["gas"] = gas;
+    checkSensor["pmsa003"] = pmsa003;
+    checkSensor["sht"] = sht;
+    checkSensor["ane"] = ane;
+    checkSensor["sen55"] = sen55;
+    checkSensor["scd30"] = scd30;
+    checkSensor["scd41"] = scd41;
+    checkSensor["gps"] = GPSsensor;
+    checkSensor["co_hd"] = co_hd;
+    checkSensor["no2_hd"] = no2_hd;
+    checkSensor["o3_hd"] = o3_hd;
+    checkSensor["so2_hd"] = so2_hd;
+    checkSensor["mics4514"] = false;
+    checkSensor["luxometer"] = lux;
+    checkSensor["soil_moisture"] = soil;
+    checkSensor["SD"] = sd;
+
+    const bool rtcAvailable = rtc_i2c_available();
+    checkSensor["rtc_i2c"] = rtcAvailable;
+
+    if (sd)
+        info["FilesinSD"] = saveCounterSD;
+    info["FilesinSPIFFS"] = saveCounterSPIFFS;
+    info["Relay1"] = relay1;
+    info["Relay2"] = relay2;
+
+    JsonObject relayState = info["RelayStates"].to<JsonObject>();
+    relayState["relay1_stored"] = read_relay1_eeprom();
+    relayState["relay2_stored"] = read_relay2_eeprom();
+
+    if (rtcAvailable)
+    {
+        DateTime now(static_cast<uint32_t>(0));
+        bool rtcRunning = false;
+        if (take_i2c_mutex("build_sensors_diagnostics_payload_rtc", pdMS_TO_TICKS(1000)))
+        {
+            now = rtc_i2c.now();
+            rtcRunning = rtc_i2c.isrunning();
+            give_i2c_mutex();
+        }
+
+        char rtcDatetime[32];
+        snprintf(rtcDatetime, sizeof(rtcDatetime), "%04d-%02d-%02d %02d:%02d:%02d",
+                 now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+        info["rtc_datetime"] = rtcDatetime;
+        info["rtc_running"] = rtcRunning;
+        info["rtc_battery_ok"] = rtcRunning;
+    }
+
+    serializeJson(checkSensor, stringCheckSensor);
+    serializeJson(info, stringInfo);
+}
+
 /**
  * Stampa diagnostica sensori
  */
@@ -5876,8 +5628,9 @@ void check_sensors_diagnostics()
     // clear the json object
     checkSensor.clear();
     info.clear();
+    Pollutants.clear();
     sensors.begin();
-    sensors.enableDebug(true); // Abilita output debug
+    sensors.enableDebug(FW_LOG_LEVEL >= 3);
 
 #if RELAY == 1
     relay1 = init_relay(RELAY1_PIN);
@@ -5971,76 +5724,7 @@ void check_sensors_diagnostics()
 
     esp_task_wdt_reset();
 
-    saveCounterSD = get_count_data_saved(SD);
-    saveCounterSPIFFS = get_count_data_saved(SPIFFS);
-
-    checkSensor["sps"] = sps;
-    checkSensor["ozone"] = ozone;
-    checkSensor["gas"] = gas;
-    checkSensor["pmsa003"] = pmsa003;
-    checkSensor["sht"] = sht;
-    checkSensor["ane"] = ane;
-    checkSensor["sen55"] = sen55;
-    checkSensor["scd30"] = scd30;
-    checkSensor["scd41"] = scd41;
-    checkSensor["gps"] = GPSsensor;
-    checkSensor["co_hd"] = co_hd;
-    checkSensor["no2_hd"] = no2_hd;
-    checkSensor["o3_hd"] = o3_hd;
-    checkSensor["so2_hd"] = so2_hd;
-    // TODO: MICS4514 TEMPORANEAMENTE DISABILITATO
-    // checkSensor["mics4514"] = mics4514;
-    checkSensor["mics4514"] = false;
-    checkSensor["luxometer"] = lux;
-    checkSensor["soil_moisture"] = soil;
-    checkSensor["SD"] = sd;
-
-    // === RTC I2C DISPONIBILITA' in checkSensor ===
-    bool rtc_available = rtc_i2c_available();
-    checkSensor["rtc_i2c"] = rtc_available;
-
-    if (sd)
-    {
-        info["FilesinSD"] = saveCounterSD;
-    }
-    info["FilesinSPIFFS"] = saveCounterSPIFFS;
-    info["Relay1"] = relay1;
-    info["Relay2"] = relay2;
-
-    // Stato persistente relay salvati in EEPROM
-    JsonObject relayState = info.createNestedObject("RelayStates");
-    relayState["relay1_stored"] = read_relay1_eeprom();
-    relayState["relay2_stored"] = read_relay2_eeprom();
-
-    // === RTC DETTAGLI in info ===
-    if (rtc_available)
-    {
-        DateTime now;
-        bool rtc_running = false;
-        bool rtc_battery_ok = false;
-
-        if (take_i2c_mutex("check_sensors_diagnostics_rtc", pdMS_TO_TICKS(1000)))
-        {
-            now = rtc_i2c.now();
-            rtc_running = rtc_i2c.isrunning();
-            rtc_battery_ok = rtc_running;
-            give_i2c_mutex();
-        }
-
-        // Crea stringa data/ora formattata
-        char rtc_datetime[20];
-        snprintf(rtc_datetime, sizeof(rtc_datetime), "%04d-%02d-%02d %02d:%02d:%02d",
-                 now.year(), now.month(), now.day(),
-                 now.hour(), now.minute(), now.second());
-
-        info["rtc_datetime"] = rtc_datetime;
-        info["rtc_running"] = rtc_running;
-        info["rtc_battery_ok"] = rtc_battery_ok;
-    }
-    info["FilesinSPIFFS"] = saveCounterSPIFFS;
-
-    serializeJson(checkSensor, stringCheckSensor);
-    serializeJson(info, stringInfo);
+    build_sensors_diagnostics_payload();
 
     // Popola vettore Pollutants in base ai sensori disponibili
     if (sps)
@@ -6148,20 +5832,25 @@ String get_id_square()
     int err = httpWifi.get(resource);
     if (err != 0)
     {
-        Serial.println("ERROR: Errore connessione");
+        Serial.printf("ERROR: [HTTP][CONFIG] GET /get_ID client_error=%d\n", err);
         return "Wait";
     }
 
     int status = httpWifi.responseStatusCode();
+    response = httpWifi.responseBody();
+    char responsePreview[257];
+    make_http_body_preview(response, responsePreview, sizeof(responsePreview));
     if (status == 200)
     {
-        response = httpWifi.responseBody();
-
+        Serial.println("[HTTP][CONFIG] GET /get_ID status=200");
+        Serial.printf("DEBUG: [HTTP][CONFIG] response=%s\n",
+                      responsePreview[0] ? responsePreview : "<empty>");
         return response;
     }
     else
     {
-        Serial.printf("ERROR: Errore HTTP %d\n", status);
+        Serial.printf("ERROR: [HTTP][CONFIG] GET /get_ID status=%d body=%s\n",
+                      status, responsePreview[0] ? responsePreview : "<empty>");
         return "Wait";
     }
 }
@@ -6244,20 +5933,26 @@ bool get_nearest_data(const String &params)
     int err = httpWifi.get(resource);
     if (err != 0)
     {
-        Serial.println("ERROR: Errore connessione");
+        Serial.printf("ERROR: [HTTP][DATA] GET /get_nearest_data client_error=%d\n", err);
         return false;
     }
 
     int status = httpWifi.responseStatusCode();
+    String response = httpWifi.responseBody();
+    char responsePreview[257];
+    make_http_body_preview(response, responsePreview, sizeof(responsePreview));
     if (status == 200)
     {
-        String response = httpWifi.responseBody();
+        Serial.println("[HTTP][DATA] GET /get_nearest_data status=200");
+        Serial.printf("DEBUG: [HTTP][DATA] response=%s\n",
+                      responsePreview[0] ? responsePreview : "<empty>");
         parse_response(response);
         return true;
     }
     else
     {
-        Serial.printf("ERROR: Errore HTTP %d\n", status);
+        Serial.printf("ERROR: [HTTP][DATA] GET /get_nearest_data status=%d body=%s\n",
+                      status, responsePreview[0] ? responsePreview : "<empty>");
         return false;
     }
 }
@@ -6376,6 +6071,21 @@ void updateFromFile(File updateBin, const char *filePath)
         return;
     }
 
+    String firmwareName = String(filePath);
+    const int lastSlash = firmwareName.lastIndexOf('/');
+    if (lastSlash >= 0)
+        firmwareName.remove(0, static_cast<unsigned int>(lastSlash + 1));
+    firmwareName.trim();
+    if (!firmware_name_fits_storage(firmwareName.c_str()))
+    {
+        Serial.printf("ERROR: [OTA] SD firmware name invalid/too long (%u/%u): %s\n",
+                      static_cast<unsigned>(firmwareName.length()),
+                      static_cast<unsigned>(EEPROM_ADDR::VERSION_MAX_LENGTH),
+                      firmwareName.c_str());
+        updateBin.close();
+        return;
+    }
+
     size_t updateSize = updateBin.size();
 
     if (updateSize == 0)
@@ -6406,8 +6116,13 @@ void updateFromFile(File updateBin, const char *filePath)
         {
             if (Update.isFinished())
             {
-
                 updateBin.close();
+
+                if (!persist_ota_firmware_name(firmwareName))
+                {
+                    Serial.println("CRITICAL: [OTA] SD update written but reboot blocked: firmware name not persisted");
+                    return;
+                }
 
                 String filePathStr = String(filePath);
                 if (filePathStr.charAt(0) != '/')
@@ -6499,13 +6214,16 @@ void IRAM_ATTR wifi_sniffer_packet(void *buf, wifi_promiscuous_pkt_type_t type)
  * @param vec Vector di stringhe
  * @return Stringa JSON encoded
  */
-String vector_to_encoded_json_array(const std::vector<String> &vec)
+String pollutant_mask_to_encoded_json_array(const PollutantMask &pollutants)
 {
     String result = "[";
-    for (size_t i = 0; i < vec.size(); ++i)
+    result.reserve(2 + pollutants.size() * 20);
+    for (size_t i = 0; i < pollutants.size(); ++i)
     {
-        result += "%22" + vec[i] + "%22"; // %22 = "
-        if (i != vec.size() - 1)
+        result += "%22";
+        result += pollutants[i];
+        result += "%22"; // %22 = "
+        if (i != pollutants.size() - 1)
         {
             result += ",%20"; // %20 = spazio
         }
@@ -6724,9 +6442,6 @@ void set_rtc(int timestamp)
             }
         }
 
-        // Log per debug - Usa gmtime() per UTC, non localtime()
-        time_t t = timestamp;
-        struct tm *timeinfo = gmtime(&t); // gmtime() per UTC, localtime() applica timezone
     }
     else
     {
@@ -6748,6 +6463,7 @@ void set_rtc(int timestamp)
 String urlencode(const String &str)
 {
     String encoded = "";
+    encoded.reserve(str.length() * 3U);
     for (size_t i = 0; i < str.length(); i++)
     {
         char c = str[i];
@@ -6776,6 +6492,12 @@ String urlencode(const String &str)
  */
 void send_sensors_diagnostics()
 {
+    build_sensors_diagnostics_payload();
+
+    Serial.printf("[SENSORS] SPS30:%d OZONE:%d SCD30:%d SCD41:%d GAS:%d SEN55:%d SHT21:%d\n",
+                  sps, ozone, scd30, scd41, gas, sen55, sht);
+    Serial.printf("[SENSORS] ANE:%d SOIL:%d LUX:%d PMS:%d GPS:%d SD:%d SPIFFS:%d\n",
+                  ane, soil, lux, pmsa003, GPSsensor, sd, spiffsReady);
     Serial.println("");
     Serial.println("[DIAG] DIAGNOSTICA SENSORI:");
     Serial.printf("[DIAG] SPS30: %d | OZONE: %d | SCD30: %d | SCD41: %d\n",
@@ -6792,7 +6514,7 @@ void send_sensors_diagnostics()
 
     if (rtc_i2c_available())
     {
-        DateTime now;
+        DateTime now(static_cast<uint32_t>(0));
         bool running = false;
         if (take_i2c_mutex("send_sensors_diagnostics_rtc", pdMS_TO_TICKS(1000)))
         {
@@ -6819,7 +6541,8 @@ void send_sensors_diagnostics()
 
     // === INVIO HTTP AL SERVER (diagnostica via API) ===
     // Come nel main_old.cpp: invia diagnostica al server per monitoraggio storico
-    if (WiFi.status() == WL_CONNECTED)
+    TemporaryWifiState wifiState;
+    if (begin_temporary_wifi(wifiState, "DIAG"))
     {
 
         String response = "";
@@ -6842,37 +6565,49 @@ void send_sensors_diagnostics()
         String encodedSensors = urlencode(String(sensorsBuf));
         String encodedInfo = urlencode(String(infoBuf));
 
-        // Formato: /set_sensors?sensors=<URL-ENCODED-JSON>&ID=topic&versione=firmware&info=<URL-ENCODED-JSON>
+        // Formato documentato: /set_sensors?sensors=...&ID=...&versione=...&board=...&info=...
         const String resource = "/set_sensors?sensors=" + encodedSensors +
                                 "&ID=" + topic +
                                 "&versione=" + nameBinESP +
+                                "&board=" + verionBoard +
                                 "&info=" + encodedInfo;
 
-        WiFiClient clientWifi;
-        HttpClient httpWifi(clientWifi, host, port);
+        Serial.printf("DEBUG: [HTTP][DIAG] GET /set_sensors ID=%s version=%s board=%s sensors=%s info=%s\n",
+                      topic.c_str(), nameBinESP.c_str(), verionBoard, sensorsBuf, infoBuf);
+
+        WiFiClient diagnosticsHttpClient;
+        HttpClient httpWifi(diagnosticsHttpClient, host, port);
 
         int err = httpWifi.get(resource);
         if (err != 0)
         {
-            Serial.printf("ERROR: ✗ Errore HttpClient: %d\n", err);
+            Serial.printf("ERROR: [HTTP][DIAG] GET /set_sensors client_error=%d\n", err);
         }
         else
         {
             int status = httpWifi.responseStatusCode();
+            response = httpWifi.responseBody();
+            char responsePreview[257];
+            make_http_body_preview(response, responsePreview, sizeof(responsePreview));
 
             if (status == 200)
             {
-                response = httpWifi.responseBody();
+                Serial.printf("[HTTP][DIAG] GET /set_sensors status=200 body=%s\n",
+                              responsePreview[0] ? responsePreview : "<empty>");
             }
             else
             {
-                Serial.printf("ERROR: ✗ Errore HTTP %d\n", status);
+                Serial.printf("ERROR: [HTTP][DIAG] GET /set_sensors status=%d body=%s\n",
+                              status, responsePreview[0] ? responsePreview : "<empty>");
             }
         }
+
+        end_temporary_wifi(wifiState, "DIAG");
     }
     else
     {
         Serial.println("DEBUG: WiFi offline - skip invio HTTP server");
+        end_temporary_wifi(wifiState, "DIAG");
     }
 }
 
