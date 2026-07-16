@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import uuid
 import webbrowser
 from http import HTTPStatus
@@ -24,6 +26,12 @@ import ota_release as ota  # noqa: E402
 
 PLANS: dict[str, dict] = {}
 DASHBOARD_API_KEY: str | None = None
+ENVIRONMENT_BOARDS = {
+    "sensy_2024_V4_black": "2024V4_BK", "sensy_2024_V4_green": "2024V4_GR",
+    "sensy_2024_V3_red": "2024V3_RD", "sensy_2024_V2_ENEA": "2024V2_EN",
+    "sensy_2024_V1_green": "2024V1_GR", "sensy_2023_V2_black": "2023V2_BK",
+    "sensy_2023_V1_green": "2023V1_GR", "sensy_2021_V4_white": "2021V4_WH",
+}
 
 
 def load_config() -> dict:
@@ -82,6 +90,25 @@ def releases() -> list[str]:
     return sorted((path.name for path in directory.glob("*.bin") if ota.FIRMWARE_RE.fullmatch(path.name)), reverse=True)
 
 
+def next_release_version(board: str | None) -> str:
+    versions: list[tuple[int, ...]] = []
+    response = ota.SquareApi(api_key()).post("lista_firmware")
+    names = response.get("result", []) if isinstance(response, dict) else []
+    if not ota.response_ok(response) or not isinstance(names, list):
+        raise ValueError("catalogo firmware backend non disponibile")
+    for name in names:
+        if not isinstance(name, str):
+            continue
+        match = ota.FIRMWARE_RE.fullmatch(name)
+        if match and (board is None or match.group("board") == board):
+            versions.append(tuple(int(part) for part in match.group("version")[1:].split("_")))
+    if not versions:
+        raise ValueError("nessun firmware backend per board: inserire prima versione manuale")
+    latest = list(max(versions))
+    latest[-1] += 1
+    return "V" + "_".join(map(str, latest))
+
+
 def release_path(name: str) -> Path:
     safe_name = ota.firmware_name(name)
     directory = firmware_dir()
@@ -89,6 +116,20 @@ def release_path(name: str) -> Path:
     if path.parent != directory or not path.is_file():
         raise ValueError("firmware non disponibile nel percorso configurato")
     return path
+
+
+def git_branches(root: Path) -> tuple[list[str], str]:
+    result = subprocess.run(
+        ["git", "-C", str(root), "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if result.returncode:
+        raise ValueError("progetto firmware non è repository Git")
+    current = subprocess.run(
+        ["git", "-C", str(root), "branch", "--show-current"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    return sorted(line.strip() for line in result.stdout.splitlines() if line.strip()), current.stdout.strip()
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
@@ -144,6 +185,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except Exception as exc:
                 self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"errore server: {exc}"})
             return
+        if path == "/api/branches":
+            try:
+                branches, current = git_branches(project_root())
+                self.send_json(HTTPStatus.OK, {"branches": branches, "current_branch": current})
+            except ValueError as exc:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
         if self.path == "/":
             self.path = "/index.html"
         return super().do_GET()
@@ -173,22 +221,51 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         build_script = root / "scripts" / "build_matrix.py"
         if not build_script.is_file():
             raise ValueError("progetto firmware non valido: scripts/build_matrix.py assente")
+        branches, current_branch = git_branches(root)
+        selected_branch = payload.get("branch") or current_branch
+        if selected_branch not in branches:
+            raise ValueError("branch non disponibile nel progetto firmware")
+        build_root = root
+        worktree_path: Path | None = None
+        if selected_branch != current_branch:
+            worktree_path = Path(tempfile.mkdtemp(prefix="sense-square-ota-"))
+            shutil.rmtree(worktree_path)
+            checkout = subprocess.run(
+                ["git", "-C", str(root), "worktree", "add", "--force", "--quiet", str(worktree_path), selected_branch],
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            if checkout.returncode:
+                raise RuntimeError(f"worktree branch non disponibile: {checkout.stdout.strip()}")
+            build_root = worktree_path
+            build_script = build_root / "scripts" / "build_matrix.py"
         command = [sys.executable, str(build_script), "--check", "--artifacts-dir", str(firmware_dir())]
+        channel = payload.get("channel")
         if payload.get("branch_release"):
-            command.append("--branch-release")
-        else:
-            channel = payload.get("channel")
             version = payload.get("version")
-            if channel not in ota.CHANNEL_CODES or not isinstance(version, str):
+            if channel in {"beta", "stable"}:
+                selected_env = next(iter(payload.get("environments", [])), None)
+                version = next_release_version(ENVIRONMENT_BOARDS.get(selected_env))
+            if channel not in {"beta", "stable"} or not isinstance(version, str):
+                raise ValueError("selezionare canale")
+            command.extend(["--channel", channel, "--version", version])
+        else:
+            version = payload.get("version")
+            if channel not in {"beta", "stable"} or not isinstance(version, str):
                 raise ValueError("selezionare canale e versione")
             command.extend(["--channel", channel, "--version", version])
         for environment in payload.get("environments", []):
             if not isinstance(environment, str) or not environment.replace("_", "").isalnum():
                 raise ValueError(f"ambiente non valido: {environment}")
             command.extend(["--env", environment])
-        process = subprocess.run(command, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        try:
+            process = subprocess.run(command, cwd=build_root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        finally:
+            if worktree_path:
+                subprocess.run(["git", "-C", str(root), "worktree", "remove", "--force", str(worktree_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                shutil.rmtree(worktree_path, ignore_errors=True)
         self.send_json(HTTPStatus.OK if process.returncode == 0 else HTTPStatus.BAD_REQUEST, {
             "ok": process.returncode == 0,
+            "branch": selected_branch,
             "output": process.stdout[-12000:],
             "releases": releases(),
         })
