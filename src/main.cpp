@@ -5575,10 +5575,10 @@ static void build_sensors_diagnostics_payload()
     checkSensor["scd30"] = scd30;
     checkSensor["scd41"] = scd41;
     checkSensor["gps"] = GPSsensor;
-    checkSensor["HD_co"] = co_hd;
-    checkSensor["HD_no2"] = no2_hd;
-    checkSensor["HD_o3"] = o3_hd;
-    checkSensor["HD_so2"] = so2_hd;
+    checkSensor["co_hd"] = co_hd;
+    checkSensor["no2_hd"] = no2_hd;
+    checkSensor["o3_hd"] = o3_hd;
+    checkSensor["so2_hd"] = so2_hd;
     checkSensor["mics4514"] = false;
     checkSensor["luxometer"] = lux;
     checkSensor["soil_moisture"] = soil;
