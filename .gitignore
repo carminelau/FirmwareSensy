@@ -9,3 +9,6 @@
 .platformio/packages.lock
 main_old.cpp
 ports/*
+.env
+dist/
+ota-dashboard-results/

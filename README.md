@@ -106,6 +106,98 @@ L'ESP32 utilizza due core. Il firmware separa le responsabilità per ridurre blo
 - OTA con verifica versione e download remoto.
 - Update da SD con ricerca file `.bin`.
 
+### Release OTA automatizzata
+
+Il nome OTA viene generato durante la build e include sempre `.bin`. Firmware salva questo nome
+in EEPROM: limite **21 caratteri**. Esempio valido al limite: `BT_2024V4_BK_V5_4.bin`.
+
+Genera binari rinominati per tutte board:
+
+```powershell
+.\build_all.bat --channel beta --version V5_4
+```
+
+File vengono copiati in `dist/`; binario interno PlatformIO non viene rinominato. Canali:
+`beta` → `BT`, `stable` → `ST`. Per una board: `--env sensy_2024_V4_black`.
+
+Per una release da branch Git diverso da `main`, usa l'incremento automatico locale:
+
+```powershell
+.\build_all.bat --branch-release
+```
+
+Legge ultima versione in `dist/`, incrementa ultimo numero (`V5_4` → `V5_5`) e crea sempre `BT`.
+Se `dist/` è vuota, creare prima una release esplicita con `--channel beta --version V5_4`.
+
+Configura una volta API key fuori repository:
+
+```powershell
+setx SENSE_SQUARE_APIKEY "<chiave API Sense Square>"
+```
+
+Apri nuovo terminale, poi:
+
+```powershell
+python scripts\ota_release.py upload --firmware dist\BT_2024V4_BK_V5_4.bin
+python scripts\ota_release.py plan --firmware dist\BT_2024V4_BK_V5_4.bin
+python scripts\ota_release.py apply --plan ota-plan-BT_2024V4_BK_V5_4.json --confirm BT_2024V4_BK_V5_4.bin
+```
+
+`upload` usa `set_board_firmware` su porta `5010`: `ST` diventa default per sua board, `BT` no.
+`suitable_board` e `default_board` usano valore inviato dal firmware a `get_ID`, es. `2024V4_BK`.
+Può registrare più file: `--firmware dist\*.bin`. `plan` legge `elenco_centraline` e `informazioni_centralina`. Include solo board compatibili con
+firmware differente; board/versione non riconosciute restano escluse. `apply` richiede nome
+completo come conferma e chiama `modifica_firmware`: centraline scaricheranno OTA al prossimo
+controllo periodico.
+
+Con API key admin, `plan` invia esplicitamente `personal=False`: considera tutte centraline
+accessibili all'account, non solo quelle personali.
+
+Per aggiornare solo centraline scelte, passare array di ID o alias a `plan`:
+
+```powershell
+python scripts\ota_release.py plan --firmware dist\BT_2024V4_BK_V5_4.bin --centraline SENSY001 SENSY002 "Casa"
+```
+
+Piano salva `requested_centraline` e `not_found_centraline`; `apply` usa esclusivamente i device
+`needs_update` presenti nel piano.
+
+Per board backend assente ma centrale scelta esplicitamente, `--force` abilita piano forzato. Non
+supera una board nota incompatibile. Se firmware installato ha nome valido, board viene ricavata
+automaticamente dal nome:
+
+```powershell
+python scripts\ota_release.py plan --firmware dist\BT_2024V4_BK_V5_5.bin --centraline SENSY001 --force
+```
+
+### Dashboard locale
+
+Avvia interfaccia web locale Sense Square:
+
+```powershell
+.\run_ota_dashboard.bat
+```
+
+Aprire `http://127.0.0.1:8765`. Dashboard esegue build, registrazione firmware, piano centraline
+e apply con conferma browser.
+
+La scheda **PLAN** legge `lista_firmware` dal backend: mostra solo firmware già caricati, quindi
+utilizzabili per OTA. La sezione **Configurazione** imposta la cartella del progetto firmware
+(quella che contiene `platformio.ini`): build viene eseguita lì e i binari restano in `dist/`.
+Configurazione viene salvata per utente in
+`%APPDATA%\SenseSquare\ota_dashboard.json` su Windows oppure `~/SenseSquare/ota_dashboard.json`
+su macOS; dopo spostamento su altro PC basta impostare nuovo percorso. Pulsante API key in alto
+apre configurazione: API key viene conservata solo nel localStorage di quel browser e passata alla
+dashboard locale in memoria, non viene scritta nel file configurazione o nel repository.
+
+Su macOS avviare dalla cartella del progetto:
+
+```bash
+bash ./run_ota_dashboard.sh
+```
+
+Dashboard seleziona italiano o inglese dal browser; menu in alto a destra permette scelta manuale.
+
 #### Build e varianti hardware
 - Configurazioni per più board in `platformio.ini`.
 - Pin e feature flag definiti tramite `build_flags`.

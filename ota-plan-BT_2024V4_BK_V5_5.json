@@ -1,0 +1,41 @@
+{
+  "created_at": "2026-07-15T14:34:10.359273+00:00",
+  "target_firmware": "BT_2024V4_BK_V5_5.bin",
+  "target_board": "2024V4_BK",
+  "requested_centraline": [
+    "ITXOMPPFYHIVW8",
+    "IT1VU1UNRBWLK2",
+    "ITEFZA2DH9ZEH2"
+  ],
+  "force_unknown_board": true,
+  "not_found_centraline": [],
+  "devices": [
+    {
+      "ID": "ITXOMPPFYHIVW8",
+      "alias": "",
+      "board": "2024V4_BK",
+      "board_source": "firmware",
+      "current_firmware": "ST_2024V4_BK_V4_2.bin",
+      "status": "needs_update",
+      "forced": false
+    },
+    {
+      "ID": "IT1VU1UNRBWLK2",
+      "alias": "",
+      "board": "",
+      "board_source": "forced",
+      "current_firmware": "FW_ST_2024V4_V3_0.bin",
+      "status": "needs_update",
+      "forced": true
+    },
+    {
+      "ID": "ITEFZA2DH9ZEH2",
+      "alias": "",
+      "board": "2024V4_BK",
+      "board_source": "firmware",
+      "current_firmware": "ST_2024V4_BK_V4_0.bin",
+      "status": "needs_update",
+      "forced": false
+    }
+  ]
+}

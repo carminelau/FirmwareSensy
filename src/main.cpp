@@ -1950,12 +1950,12 @@ void loop_monitoring(void *pvParameters)
 
         //Rami - 09 07 26
 
-           if (gas)
+        if (gas)
         {
-            doc["no2"] = constrain(no2, 0.0f, 999.999f);
-            doc["voc"] = constrain(voc, 0.0f, 999.999f);
-            doc["co"] = constrain(co, 0.0f, 1999.999f);
-            doc["c2h5oh"] = constrain(c2h5oh, 0.0f, 999.999f);
+            doc["Multi_no2"] = constrain(no2, 0.0f, 999.999f);
+            doc["Multi_voc"] = constrain(voc, 0.0f, 999.999f);
+            doc["Multi_co"] = constrain(co, 0.0f, 1999.999f);
+            doc["Multi_c2h5oh"] = constrain(c2h5oh, 0.0f, 999.999f);
         }
 
         if (co_hd)
@@ -1964,7 +1964,7 @@ void loop_monitoring(void *pvParameters)
             float co_hd_mg_m3 = co_hd_ppm * 1.165;
             if (co_hd_mg_m3 > 0 && co_hd_mg_m3 < 1165)
             {
-                doc["co"] = round(co_hd_mg_m3 * 100) / 100.0;
+                doc["HD_co"] = round(co_hd_mg_m3 * 100) / 100.0;
             }
         }
 
@@ -1974,7 +1974,7 @@ void loop_monitoring(void *pvParameters)
             float no2_hd_ug_m3 = no2_hd_ppm * 1.88;
             if (no2_hd_ug_m3 > 0 && no2_hd_ug_m3 < 37.6)
             {
-                doc["no2"] = round(no2_hd_ug_m3 * 100) / 100.0;
+                doc["HD_no2"] = round(no2_hd_ug_m3 * 100) / 100.0;
             }
         }
 
@@ -1988,7 +1988,7 @@ void loop_monitoring(void *pvParameters)
             // se vuoi tenere un filtro, alza il limite oppure rimuovilo durante i test
             if (o3_hd_ug_m3 > 0.0f && o3_hd_ug_m3 < 5000.0f)
             {
-                doc["o3"] = round(o3_hd_ug_m3 * 100.0f) / 100.0f;
+                doc["HD_o3"] = round(o3_hd_ug_m3 * 100.0f) / 100.0f;
             }
         }
 
@@ -1998,7 +1998,7 @@ void loop_monitoring(void *pvParameters)
             float so2_hd_ug_m3 = so2_hd_ppm * 2.62;
             if (so2_hd_ug_m3 > 0 && so2_hd_ug_m3 < 26.2)
             {
-                doc["so2"] = round(so2_hd_ug_m3 * 100) / 100.0;
+                doc["HD_so2"] = round(so2_hd_ug_m3 * 100) / 100.0;
             }
         }
 
@@ -2030,7 +2030,7 @@ void loop_monitoring(void *pvParameters)
         if (ozone)
         {
             if (O3 > 0 && O3 < 10000)
-                doc["o3"] = O3;
+                doc["old_o3"] = O3;
         }
 
         if (soil)
@@ -5575,10 +5575,10 @@ static void build_sensors_diagnostics_payload()
     checkSensor["scd30"] = scd30;
     checkSensor["scd41"] = scd41;
     checkSensor["gps"] = GPSsensor;
-    checkSensor["co_hd"] = co_hd;
-    checkSensor["no2_hd"] = no2_hd;
-    checkSensor["o3_hd"] = o3_hd;
-    checkSensor["so2_hd"] = so2_hd;
+    checkSensor["HD_co"] = co_hd;
+    checkSensor["HD_no2"] = no2_hd;
+    checkSensor["HD_o3"] = o3_hd;
+    checkSensor["HD_so2"] = so2_hd;
     checkSensor["mics4514"] = false;
     checkSensor["luxometer"] = lux;
     checkSensor["soil_moisture"] = soil;
@@ -5774,30 +5774,30 @@ void check_sensors_diagnostics()
     // }
     if (gas)
     {
-        Pollutants.push_back("voc");
-        Pollutants.push_back("no2");
-        Pollutants.push_back("co");
-        Pollutants.push_back("c2h5oh");
+        Pollutants.push_back("Multi_voc");
+        Pollutants.push_back("Multi_no2");
+        Pollutants.push_back("Multi_co");
+        Pollutants.push_back("Multi_c2h5oh");
     }
     if (ozone)
     {
-        Pollutants.push_back("o3");
+        Pollutants.push_back("old_o3");
     }
     if (co_hd)
     {
-        Pollutants.push_back("co");
+        Pollutants.push_back("HD_co");
     }
     if (no2_hd)
     {
-        Pollutants.push_back("no2");
+        Pollutants.push_back("HD_no2");
     }
     if (o3_hd)
     {
-        Pollutants.push_back("o3");
+        Pollutants.push_back("HD_o3");
     }
     if (so2_hd)
     {
-        Pollutants.push_back("so2");
+        Pollutants.push_back("HD_so2");
     }
     if (ane)
     {

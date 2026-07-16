@@ -188,7 +188,10 @@ String topic = "";
 String nameBinESP = "";
 String topicListen;
 String timezone_it = "CET-1CEST,M3.5.0,M10.5.0/3";
-const char *verionBoard = STR(YEAR) "V" STR(VERSION);
+#ifndef OTA_BOARD
+#error "OTA_BOARD must be defined by the PlatformIO environment"
+#endif
+const char *verionBoard = OTA_BOARD;
 
 /**********************************
  *     VARIABILI DI STATO         *

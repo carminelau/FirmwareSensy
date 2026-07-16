@@ -45,12 +45,21 @@ static void test_pollutants_are_unique_and_ordered()
     PollutantMask pollutants;
     TEST_ASSERT_TRUE(pollutants.add("pm1"));
     TEST_ASSERT_TRUE(pollutants.add("co2"));
+    TEST_ASSERT_TRUE(pollutants.add("Multi_no2"));
+    TEST_ASSERT_TRUE(pollutants.add("HD_no2"));
+    TEST_ASSERT_TRUE(pollutants.add("old_o3"));
     TEST_ASSERT_FALSE(pollutants.add("pm1"));
     TEST_ASSERT_FALSE(pollutants.add("unknown"));
-    TEST_ASSERT_EQUAL_UINT32(2, pollutants.size());
+    TEST_ASSERT_EQUAL_UINT32(5, pollutants.size());
     TEST_ASSERT_EQUAL_STRING("pm1", pollutants[0]);
     TEST_ASSERT_EQUAL_STRING("co2", pollutants[1]);
+    TEST_ASSERT_EQUAL_STRING("Multi_no2", pollutants[2]);
+    TEST_ASSERT_EQUAL_STRING("HD_no2", pollutants[3]);
+    TEST_ASSERT_EQUAL_STRING("old_o3", pollutants[4]);
     TEST_ASSERT_TRUE(pollutants.contains("pm1"));
+    TEST_ASSERT_TRUE(pollutants.contains("Multi_no2"));
+    TEST_ASSERT_TRUE(pollutants.contains("HD_no2"));
+    TEST_ASSERT_TRUE(pollutants.contains("old_o3"));
     pollutants.clear();
     TEST_ASSERT_EQUAL_UINT32(0, pollutants.size());
 }

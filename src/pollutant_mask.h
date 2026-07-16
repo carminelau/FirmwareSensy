@@ -51,7 +51,7 @@ public:
     }
 
 private:
-    static constexpr size_t NAME_COUNT = 19;
+    static constexpr size_t NAME_COUNT = 28;
     uint32_t bits_;
     uint8_t count_;
     uint8_t order_[NAME_COUNT];
@@ -59,10 +59,11 @@ private:
     static const char *nameAt(size_t index)
     {
         static const char *const names[NAME_COUNT] = {
-            "c2h5oh", "co", "co2", "direzione_vento", "intensita_vento",
-            "luminosita", "nh3", "no2", "nox_index", "o3", "pm1", "pm10",
-            "pm2_5", "pressione", "so2", "temperatura", "umidita", "voc",
-            "voc_index"};
+            "HD_co", "HD_no2", "HD_o3", "HD_so2", "Multi_c2h5oh",
+            "Multi_co", "Multi_no2", "Multi_voc", "c2h5oh", "co", "co2",
+            "direzione_vento", "intensita_vento", "luminosita", "nh3", "no2",
+            "nox_index", "o3", "old_o3", "pm1", "pm10", "pm2_5",
+            "pressione", "so2", "temperatura", "umidita", "voc", "voc_index"};
         return names[index];
     }
 
@@ -83,4 +84,4 @@ private:
     }
 };
 
-static_assert(sizeof(PollutantMask) == 24, "PollutantMask layout changed: RAM budget invalid");
+static_assert(sizeof(PollutantMask) == 36, "PollutantMask layout changed: RAM budget invalid");
