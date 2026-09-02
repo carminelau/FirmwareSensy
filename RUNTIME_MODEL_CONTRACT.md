@@ -9,13 +9,25 @@ Sample risposta bulk: `samples/runtime_models_response_v1.json`. Il file `runtim
 ## Request firmware
 
 ```http
-GET /get_runtime_models?ID=DEVICE_ID HTTP/1.1
-Host: sensy.sensesquare.eu:5000
+GET /get_calibration_equations?ID=DEVICE_ID HTTP/1.1
+Host: 193.205.184.54:5000
 ```
 
-Sensy invia solo `ID`. Backend restituisce lo snapshot autorevole di tutte le equazioni correnti:
+Sensy invia solo `ID`. Backend restituisce lo snapshot autorevole di tutte le equazioni correnti dentro `result`:
 
-- `200 application/json`: oggetto root dove ogni chiave è un inquinante e ogni valore è il relativo modello;
+```json
+{
+  "message": "Calibration equations found",
+  "response_code": 200,
+  "result": {
+    "no2": { "...": "modello" }
+  }
+}
+```
+
+Per compatibilità, firmware accetta anche la mappa inquinanti direttamente alla root.
+
+- `200 application/json`: `response_code` deve essere `200` e `result` contiene una chiave per inquinante;
 - altri status: firmware conserva ultimo modello valido in cache.
 
 Dimensione massima risposta: 65536 byte. Ogni modello conserva il proprio `schema_version: 1`.
@@ -33,7 +45,7 @@ Esempio abbreviato; ogni valore contiene il modello completo mostrato nel sample
 
 Target runtime ammessi: `c2h5oh`, `c6h6`, `co`, `co2`, `nh3`, `no2`, `nox_index`, `o3`, `pm1`, `pm10`, `pm2_5`, `so2`, `voc`, `voc_index`. Firmware registra soltanto quelli associati ai sensori rilevati; con Multigas aggiunge anche `c6h6`.
 
-Mapping obbligatorio Multigas: `c6h6` è output benzene calibrato usando canale raw VOC `GM502B` (`inputs.multigas_voc_raw`). Non esiste un raw C6H6 separato. Chiave JSON e `output.field` restano `c6h6`; solo input hardware è VOC.
+Mapping obbligatorio Multigas: chiave modello e `output.field` restano `c6h6`, ma payload dati usa chiave esistente `voc`. Valore non calibrato hardware `GM502B` viene pubblicato in `voc_raw`. Non esiste un raw C6H6 separato.
 
 ## Dati forniti dal backend
 
@@ -55,7 +67,7 @@ Backend non deve inviare valori sensore correnti, lag calcolati o termini polino
 - Campioni raw storici, lag t-1h/t-2h e medie rolling 3h.
 - Giorni trascorsi dall'epoch fornito dal backend.
 - Quadrati, interazioni e `max(0, temperatura - soglia)`.
-- Un valore finale per ogni modello abilitato, pubblicato nel relativo `output.field`.
+- Un valore finale per ogni modello abilitato. `no2` produce `no2` calibrato e `no2_raw`; `c6h6` produce `voc` calibrato e `voc_raw`. Altri output mantengono chiave inquinante e aggiungono `<inquinante>_raw`.
 
 Storia raw usa 64 campioni con timestamp, condivisi tra modelli e conservati sia in RTC memory sia in SPIFFS. Sopravvive quindi anche a perdita completa di alimentazione. Firmware usa la cadenza più fitta richiesta dai modelli caricati. Se `require_full_rolling_window` è `true`, ogni modello attende indipendentemente lag e finestra completa.
 

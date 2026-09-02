@@ -292,7 +292,7 @@ def ensure_runtime_model_indexes(ssdb: Database) -> None:
 def register_runtime_model_route(app: Any, ssdb: Database) -> None:
     """Register bulk route plus backward-compatible single-model route."""
 
-    @app.route("/get_runtime_models", methods=["GET"])
+    @app.route("/get_calibration_equations", methods=["GET"])
     def get_runtime_models():
         sensy_id = (request.args.get("ID") or "").strip()
         if not SAFE_ID.fullmatch(sensy_id):

@@ -278,6 +278,7 @@ float adc1_O3, adc2_O3;
 float no2 = 0.0f, c2h5oh = 0.0f, voc = 0.0f, co = 0.0f;
 float nh3;
 uint32_t multigas_raw_no2 = 0;
+uint32_t multigas_raw_co = 0;
 uint32_t multigas_raw_voc = 0;
 bool multigas_raw_read_ok = false;
 

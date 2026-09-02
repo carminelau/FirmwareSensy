@@ -5,17 +5,25 @@
 Server: `server_centraline`, file esistente `server_centraline/app.py`.
 
 ```http
-GET https://square.sensesquare.eu:5000/get_runtime_models?ID=SENSY_ID
+GET http://193.205.184.54:5000/get_calibration_equations?ID=SENSY_ID
 ```
 
-Firmware attuale usa host `sensy.sensesquare.eu:5000`. Verificare che sia alias dello stesso `server_centraline`; altrimenti aggiornare host firmware o DNS.
+Firmware usa `193.205.184.54:5000` esclusivamente per recuperare equazioni. Le altre route continuano a usare host backend già configurato.
+
+Caricamento amministrativo usa multipart/form-data:
+
+```http
+POST https://beta.sensesquare.eu/api/user/set_calibration_equations
+```
+
+Campi: `apikey`, `ID`, `equations`. `equations` deve essere serializzato come stringa JSON; esempio demo verificabile in `samples/demo_calibration_equations_ITPHVQWGHETJL3.json` usa `no2 = 2 * no2_raw + 10`.
 
 Unico parametro: `ID` Sensy. La route restituisce tutte le equazioni correnti associate a tale ID.
 
 Esempio:
 
 ```bash
-curl -i "https://square.sensesquare.eu:5000/get_runtime_models?ID=SENSY_ID"
+curl -i "http://193.205.184.54:5000/get_calibration_equations?ID=SENSY_ID"
 ```
 
 ## Integrazione Flask
@@ -94,7 +102,7 @@ Collection proposta: `SSDB.sensy_runtime_models` (il nome non è obbligatorio).
 
 Contiene solo la configurazione corrente: una sola entry per coppia `(ID, pollutant)`, senza storico delle equazioni.
 
-Per `pollutant = c6h6`, modello deve usare `Multigas VOC [raw]`, mappato a `inputs.multigas_voc_raw` con source `GM502B`. `output.field` resta `c6h6`; non usare `voc` come chiave output.
+Per `pollutant = c6h6`, modello usa `Multigas VOC [raw]`, mappato a `inputs.multigas_voc_raw` con source `GM502B`. Nel contratto equazioni `output.field` resta `c6h6`; firmware pubblica risultato nelle chiavi dati esistenti `voc` e `voc_raw`.
 
 ```json
 {

@@ -3695,6 +3695,7 @@ void read_multigas()
     uint32_t raw_co  = sensore.getGM702B();
     uint32_t raw_voc = sensore.getGM502B();
     multigas_raw_no2 = raw_no2;
+    multigas_raw_co = raw_co;
     multigas_raw_voc = raw_voc;
     multigas_raw_read_ok = true;
 
@@ -6111,6 +6112,12 @@ static bool parse_runtime_model_payload(const String &payload, RuntimeModel &par
 
 static bool runtime_model_target_allowed(const char *pollutant);
 
+static const char *runtime_model_payload_field(const char *pollutant)
+{
+    // Backend/model name C6H6 corresponds to existing Multigas VOC payload field.
+    return pollutant != nullptr && strcmp(pollutant, "c6h6") == 0 ? "voc" : pollutant;
+}
+
 namespace
 {
 constexpr const char *RUNTIME_MODELS_SLOT_A = "/rms_a.bin";
@@ -6289,7 +6296,27 @@ static bool parse_runtime_models_response(const String &payload,
         parseError = String("invalid JSON: ") + jsonError.c_str();
         return false;
     }
-    JsonObjectConst models = parsed.as<JsonObjectConst>();
+    JsonObjectConst root = parsed.as<JsonObjectConst>();
+    if (root.isNull())
+    {
+        parseError = "invalid response object";
+        return false;
+    }
+
+    // Production endpoint wraps equations in { response_code, result }.
+    // Keep accepting the original direct pollutant map for compatibility.
+    JsonObjectConst models = root;
+    if (!root["result"].isNull())
+    {
+        if (!root["response_code"].is<int>() ||
+            root["response_code"].as<int>() != 200)
+        {
+            parseError = String("backend response_code=") +
+                         root["response_code"].as<int>();
+            return false;
+        }
+        models = root["result"].as<JsonObjectConst>();
+    }
     if (models.isNull() || models.size() > RUNTIME_MODEL_CONTRACT::MAX_MODELS)
     {
         parseError = "invalid models object";
@@ -6307,6 +6334,16 @@ static bool parse_runtime_models_response(const String &payload,
         {
             parseError = "invalid or duplicate pollutant";
             return false;
+        }
+        const char *payloadField = runtime_model_payload_field(pollutant);
+        for (size_t i = 0; i < parsedRegistry.count; ++i)
+        {
+            if (strcmp(runtime_model_payload_field(parsedRegistry.slots[i].pollutant),
+                       payloadField) == 0)
+            {
+                parseError = "duplicate payload output field";
+                return false;
+            }
         }
         const int index = runtime_model_registry_add(parsedRegistry, pollutant);
         if (index < 0)
@@ -6730,8 +6767,12 @@ bool fetch_runtime_models(uint32_t currentEpoch)
                             "?ID=" + urlencode(topic);
 
     WiFiClient runtimeModelHttpClient;
-    HttpClient http(runtimeModelHttpClient, host, port);
+    HttpClient http(runtimeModelHttpClient, HTTP_CONTRACT::RUNTIME_MODELS_HOST,
+                    HTTP_CONTRACT::RUNTIME_MODELS_PORT);
     http.setHttpResponseTimeout(10000);
+    Serial.printf("[HTTP][MODELS] GET %s:%d%s\n",
+                  HTTP_CONTRACT::RUNTIME_MODELS_HOST,
+                  HTTP_CONTRACT::RUNTIME_MODELS_PORT, resource.c_str());
     const int error = http.get(resource);
     if (error != 0)
     {
@@ -6865,11 +6906,31 @@ void apply_runtime_models_to_document(uint32_t currentEpoch)
             continue;
         }
 
-        doc[slot.model.outputField] = prediction;
+        const char *payloadField = runtime_model_payload_field(slot.pollutant);
+        const String rawField = String(payloadField) + "_raw";
+        if (strcmp(slot.pollutant, "no2") == 0)
+        {
+            doc[rawField] = multigas_raw_no2;
+        }
+        else if (strcmp(slot.pollutant, "c6h6") == 0 ||
+                 strcmp(slot.pollutant, "voc") == 0)
+        {
+            doc[rawField] = multigas_raw_voc;
+        }
+        else if (strcmp(slot.pollutant, "co") == 0)
+        {
+            doc[rawField] = multigas_raw_co;
+        }
+        else if (doc[payloadField].is<float>() || doc[payloadField].is<double>() ||
+                 doc[payloadField].is<long>() || doc[payloadField].is<unsigned long>())
+        {
+            doc[rawField] = doc[payloadField];
+        }
+        doc[payloadField] = prediction;
         if (slot.lastFeatureStatus != RuntimeFeatureStatus::READY)
         {
             Serial.printf("[MODEL][%s] Features ready; publishing %s\n",
-                          slot.pollutant, slot.model.outputField);
+                          slot.pollutant, payloadField);
         }
         slot.lastFeatureStatus = RuntimeFeatureStatus::READY;
 #if FW_LOG_LEVEL >= 3

@@ -35,7 +35,8 @@ Backend resources remain `/epoch`, `/get_ID`, `/get_nearest_data`,
 `/versione_firmware`, `/aggiornamento_firmware` and `/set_sensors`. Diagnostics sends
 the documented `sensors`, `ID`, `versione`, `board` and `info` query fields.
 
-Runtime-model firmware calls `GET /get_runtime_models` once using only `ID`. Response contains
+Runtime-model firmware calls `GET /get_calibration_equations` once using only `ID`. Production response wraps
+the pollutant map in `result`; direct root maps remain accepted for compatibility. Response contains
 the authoritative root object keyed by pollutant. Model bundle and timestamped
 raw history use checksummed dual-slot SPIFFS storage, surviving complete power loss. Contract
 is documented in `RUNTIME_MODEL_CONTRACT.md`. Existing backend resources are unchanged.
@@ -49,7 +50,8 @@ is documented in `RUNTIME_MODEL_CONTRACT.md`. Existing backend resources are unc
 - Sensor JSON keeps existing keys and units, including `timestamp`, location/GPS fields,
   PM fields, temperature/humidity, gas fields, CO2, wind, soil, luminosity and
   `num_devices_sniffed`.
-- Every enabled runtime model with complete features adds or replaces its own `output.field`.
+- Every enabled runtime model with complete features preserves raw value as `<payload_field>_raw` and replaces existing payload field with calibrated value. Model `c6h6` maps to payload `voc`/`voc_raw`.
+- Pollutants without an active equation keep only their normal payload key; no `_raw` key is added.
   Response field must match requested `Pollutant`; one invalid model does not block others.
 
 ## Runtime schemes

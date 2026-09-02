@@ -444,12 +444,21 @@ inline RuntimeFeatureStatus build_runtime_model_features(const RuntimeModel &mod
 
     RuntimeHistorySample lag1 = {};
     RuntimeHistorySample lag2 = {};
-    if (!runtime_history_nearest(history, currentEpoch - model.lag1Seconds,
+    const RuntimeModelCoefficients &coefficients = model.coefficients;
+    const bool needsLag1 = coefficients.no2RawLag1 != 0.0f ||
+                           coefficients.vocRawLag1 != 0.0f;
+    const bool needsLag2 = coefficients.no2RawLag2 != 0.0f ||
+                           coefficients.vocRawLag2 != 0.0f;
+    const bool needsRolling = coefficients.no2RawRolling != 0.0f ||
+                              coefficients.vocRawRolling != 0.0f;
+    if (needsLag1 &&
+        !runtime_history_nearest(history, currentEpoch - model.lag1Seconds,
                                  model.lagToleranceSeconds, lag1))
     {
         return RuntimeFeatureStatus::LAG_1_MISSING;
     }
-    if (!runtime_history_nearest(history, currentEpoch - model.lag2Seconds,
+    if (needsLag2 &&
+        !runtime_history_nearest(history, currentEpoch - model.lag2Seconds,
                                  model.lagToleranceSeconds, lag2))
     {
         return RuntimeFeatureStatus::LAG_2_MISSING;
@@ -457,7 +466,8 @@ inline RuntimeFeatureStatus build_runtime_model_features(const RuntimeModel &mod
 
     float no2RollingHardwareRaw = 0.0f;
     float vocRollingHardwareRaw = 0.0f;
-    if (!runtime_history_rolling_average(history, currentEpoch, model.rollingWindowSeconds,
+    if (needsRolling &&
+        !runtime_history_rolling_average(history, currentEpoch, model.rollingWindowSeconds,
                                          model.minimumRollingSamples,
                                          model.requireFullRollingWindow,
                                          model.lagToleranceSeconds,

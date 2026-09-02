@@ -59,6 +59,25 @@ class RuntimeEquationParserTests(unittest.TestCase):
         self.assertEqual("GM502B", payload["c6h6"]["inputs"]["multigas_voc_raw"]["source"])
         self.assertEqual(1.0, payload["c6h6"]["coefficients"]["voc_raw"])
 
+    def test_device_demo_equation_is_easy_to_verify(self):
+        payload = json.loads(
+            (
+                REPOSITORY_ROOT
+                / "samples"
+                / "demo_calibration_equations_ITPHVQWGHETJL3.json"
+            ).read_text(encoding="utf-8")
+        )
+        coefficients = payload["no2"]["coefficients"]
+        self.assertEqual(10.0, coefficients["intercept"])
+        self.assertEqual(2.0, coefficients["no2_raw"])
+        self.assertTrue(
+            all(
+                value == 0.0
+                for name, value in coefficients.items()
+                if name not in {"intercept", "no2_raw"}
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -68,7 +68,9 @@ static void test_diagnostics_http_contract()
 {
     TEST_ASSERT_EQUAL_STRING("/set_sensors", HTTP_CONTRACT::DIAGNOSTICS_ROUTE);
     TEST_ASSERT_EQUAL_STRING("/get_runtime_model", HTTP_CONTRACT::RUNTIME_MODEL_ROUTE);
-    TEST_ASSERT_EQUAL_STRING("/get_runtime_models", HTTP_CONTRACT::RUNTIME_MODELS_ROUTE);
+    TEST_ASSERT_EQUAL_STRING("193.205.184.54", HTTP_CONTRACT::RUNTIME_MODELS_HOST);
+    TEST_ASSERT_EQUAL_INT(5000, HTTP_CONTRACT::RUNTIME_MODELS_PORT);
+    TEST_ASSERT_EQUAL_STRING("/get_calibration_equations", HTTP_CONTRACT::RUNTIME_MODELS_ROUTE);
     TEST_ASSERT_EQUAL_UINT32(5, HTTP_CONTRACT::DIAGNOSTICS_QUERY_FIELD_COUNT);
     TEST_ASSERT_EQUAL_STRING("sensors", HTTP_CONTRACT::DIAGNOSTICS_QUERY_FIELDS[0]);
     TEST_ASSERT_EQUAL_STRING("ID", HTTP_CONTRACT::DIAGNOSTICS_QUERY_FIELDS[1]);
@@ -163,6 +165,29 @@ static void test_runtime_history_rejects_incomplete_lags()
                                                       features)));
 }
 
+static void test_runtime_model_without_temporal_terms_is_ready_immediately()
+{
+    RuntimeModel model = example_runtime_model();
+    model.coefficients.no2RawLag1 = 0.0f;
+    model.coefficients.no2RawLag2 = 0.0f;
+    model.coefficients.no2RawRolling = 0.0f;
+    model.coefficients.vocRawLag1 = 0.0f;
+    model.coefficients.vocRawLag2 = 0.0f;
+    model.coefficients.vocRawRolling = 0.0f;
+    RuntimeFeatureHistory history = {};
+    runtime_history_reset(history);
+
+    RuntimeModelFeatures features = {};
+    const uint32_t currentEpoch = model.elapsedDaysOriginEpoch + 3600UL;
+    TEST_ASSERT_EQUAL_INT(
+        static_cast<int>(RuntimeFeatureStatus::READY),
+        static_cast<int>(build_runtime_model_features(model, history, currentEpoch,
+                                                      100.0f, 200.0f, 25.0f, 50.0f,
+                                                      features)));
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 1.0f, features.no2Raw);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 2.0f, features.vocRaw);
+}
+
 static void test_runtime_model_registry_keeps_one_slot_per_pollutant()
 {
     RuntimeModelRegistry registry = {};
@@ -224,6 +249,7 @@ int main(int, char **)
     RUN_TEST(test_runtime_model_equation);
     RUN_TEST(test_runtime_history_builds_lags_and_rolling_window);
     RUN_TEST(test_runtime_history_rejects_incomplete_lags);
+    RUN_TEST(test_runtime_model_without_temporal_terms_is_ready_immediately);
     RUN_TEST(test_runtime_model_registry_keeps_one_slot_per_pollutant);
     RUN_TEST(test_runtime_history_merge_survives_out_of_order_bootstrap);
     return UNITY_END();

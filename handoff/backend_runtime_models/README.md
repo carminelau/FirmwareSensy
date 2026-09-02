@@ -2,7 +2,7 @@
 
 Questo pacchetto aggiunge al backend Flask:
 
-- route principale `GET /get_runtime_models?ID=...`;
+- route principale `GET /get_calibration_equations?ID=...`;
 - restituzione di tutte le equazioni correnti della Sensy in una sola risposta;
 - storico locale firmware resistente ai blackout; bootstrap MongoDB resta nella route singola legacy;
 - import diretto dal manifest prodotto da `Calibration_Model`;
@@ -17,6 +17,7 @@ Questo pacchetto aggiunge al backend Flask:
 - `examples/runtime_equation_input.txt`: equazione testuale di esempio.
 - `examples/runtime_model_response_v1.json`: risposta JSON di esempio.
 - `examples/runtime_models_response_v1.json`: risposta bulk usata dal firmware.
+- `examples/demo_calibration_equations_ITPHVQWGHETJL3.json`: equazione demo `no2 = 2 * no2_raw + 10` pronta per `set_calibration_equations`.
 - `self_test.py`: test rapido senza accesso a Flask o MongoDB.
 
 ## Dipendenze
@@ -55,12 +56,12 @@ L'indice unico `(ID, pollutant)` garantisce un solo modello corrente per coppia.
 La Sensy invia un solo parametro:
 
 ```http
-GET /get_runtime_models?ID=ITCURCRDIKXHW1
+GET /get_calibration_equations?ID=ITCURCRDIKXHW1
 ```
 
 Risposta: oggetto root autorevole. Ogni chiave è un inquinante (`no2`, `co`, `c6h6`, ecc.); valore è relativa equazione. Nessun wrapper aggiuntivo.
 
-Mapping Multigas: chiave/output `c6h6` usa come ingresso `inputs.multigas_voc_raw` con source `GM502B`. C6H6 non ha un canale raw separato; non rinominare output in `voc`.
+Mapping Multigas: chiave modello/output `c6h6` usa ingresso `inputs.multigas_voc_raw` con source `GM502B`. Firmware pubblica risultato come `voc` e conserva hardware raw come `voc_raw`.
 
 Risposte:
 
@@ -70,6 +71,10 @@ Risposte:
 - `503`: errore MongoDB.
 
 La vecchia route singola `GET /get_runtime_model?ID=...&Pollutant=...` resta disponibile per compatibilità.
+
+## Caricamento tramite backend utenti
+
+Inviare `apikey`, `ID` ed `equations` come multipart/form-data a `POST https://beta.sensesquare.eu/api/user/set_calibration_equations`. Serializzare `equations` con `json.dumps()`; non passare direttamente un dizionario Python a `requests.post(data=...)`.
 
 ## Caricamento preferito dal manifest modelling
 

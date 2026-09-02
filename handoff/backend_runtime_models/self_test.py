@@ -52,4 +52,12 @@ assert bulk_payload["no2"]["output"]["field"] == "no2"
 assert bulk_payload["c6h6"]["output"]["field"] == "c6h6"
 assert bulk_payload["c6h6"]["inputs"]["multigas_voc_raw"]["source"] == "GM502B"
 
+demo_payload = json.loads(
+    (
+        root / "examples" / "demo_calibration_equations_ITPHVQWGHETJL3.json"
+    ).read_text(encoding="utf-8")
+)
+assert demo_payload["no2"]["coefficients"]["intercept"] == 10.0
+assert demo_payload["no2"]["coefficients"]["no2_raw"] == 2.0
+
 print("self_test=OK")
