@@ -35,6 +35,11 @@ Backend resources remain `/epoch`, `/get_ID`, `/get_nearest_data`,
 `/versione_firmware`, `/aggiornamento_firmware` and `/set_sensors`. Diagnostics sends
 the documented `sensors`, `ID`, `versione`, `board` and `info` query fields.
 
+Runtime-model firmware calls `GET /get_runtime_models` once using only `ID`. Response contains
+the authoritative root object keyed by pollutant. Model bundle and timestamped
+raw history use checksummed dual-slot SPIFFS storage, surviving complete power loss. Contract
+is documented in `RUNTIME_MODEL_CONTRACT.md`. Existing backend resources are unchanged.
+
 ## MQTT and payloads
 
 - Publish topic: stored device `topic`; command topic: `topic + "GESTORE"`.
@@ -44,6 +49,8 @@ the documented `sensors`, `ID`, `versione`, `board` and `info` query fields.
 - Sensor JSON keeps existing keys and units, including `timestamp`, location/GPS fields,
   PM fields, temperature/humidity, gas fields, CO2, wind, soil, luminosity and
   `num_devices_sniffed`.
+- Every enabled runtime model with complete features adds or replaces its own `output.field`.
+  Response field must match requested `Pollutant`; one invalid model does not block others.
 
 ## Runtime schemes
 

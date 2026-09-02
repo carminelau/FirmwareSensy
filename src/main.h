@@ -8,6 +8,7 @@
 #include "app_config.h"
 #include "pollutant_mask.h"
 #include "protocol_contracts.h"
+#include "runtime_model.h"
 #include <Wire.h>
 #include <math.h>
 #include <EEPROM.h>
@@ -276,6 +277,9 @@ float adc1_O3, adc2_O3;
 //Rami - 09 07 26
 float no2 = 0.0f, c2h5oh = 0.0f, voc = 0.0f, co = 0.0f;
 float nh3;
+uint32_t multigas_raw_no2 = 0;
+uint32_t multigas_raw_voc = 0;
+bool multigas_raw_read_ok = false;
 
 // CO_HD Sensor (0x74)
 float co_hd_ppm = 0.0;
@@ -614,6 +618,7 @@ void create_access_point();
 void disconnect_access_point();
 void get_mac_address();
 String get_id_square();
+String urlencode(const String &str);
 
 // MQTT
 void init_mqtt();
@@ -666,6 +671,16 @@ bool get_nearest_data(const String &params);
 void parse_response(const String &payload);
 void process_token(const String &token);
 String pollutant_mask_to_encoded_json_array(const PollutantMask &pollutants);
+void register_runtime_model_targets();
+bool load_runtime_history_from_storage();
+bool persist_runtime_history();
+bool load_runtime_models_from_storage();
+bool fetch_runtime_models(uint32_t currentEpoch);
+bool runtime_models_refresh_due(uint32_t currentEpoch);
+bool load_runtime_model_from_storage(size_t modelIndex);
+bool fetch_runtime_model(size_t modelIndex, uint32_t currentEpoch);
+bool runtime_model_refresh_due(size_t modelIndex, uint32_t currentEpoch);
+void apply_runtime_models_to_document(uint32_t currentEpoch);
 
 // ===== Funzioni esportate (sniffer) =====
 

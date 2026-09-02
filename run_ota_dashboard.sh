@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-python3 tools/ota_dashboard.py --open
+python3 tools/ota_dashboard.py --open "$@"

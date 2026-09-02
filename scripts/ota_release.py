@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 
 API_BASE = "https://square.sensesquare.eu:5002"
-FIRMWARE_API_BASE = "http://square.sensesquare.eu:5010"
+FIRMWARE_API_BASE = "http://beta.sensesquare.eu:5010"
 API_KEY_ENV = "SENSE_SQUARE_APIKEY"
 MAX_FIRMWARE_NAME_LENGTH = 21
 FIRMWARE_RE = re.compile(
@@ -150,15 +150,16 @@ class SquareApi:
         self.base_url = base_url.rstrip("/")
 
     @staticmethod
-    def encode_multipart(fields: dict[str, str], file_field: tuple[str, Path] | None = None) -> tuple[bytes, str]:
+    def encode_multipart(fields: dict[str, Any], file_field: tuple[str, Path] | None = None) -> tuple[bytes, str]:
         boundary = f"----SensyRelease{uuid.uuid4().hex}"
         chunks: list[bytes] = []
         for key, value in fields.items():
+            encoded_value = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
             chunks.extend(
                 (
                     f"--{boundary}\r\n".encode(),
                     f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode(),
-                    str(value).encode(),
+                    encoded_value.encode(),
                     b"\r\n",
                 )
             )
@@ -297,11 +298,11 @@ def command_upload(args: argparse.Namespace, api: SquareApi) -> int:
             raise ValueError(f"file firmware non trovato: {path}")
         name = firmware_name(path.name)
         response = api.post(
-            "set_board_firmware",
+            "inserimento_firmware",
             board_firmware_payload(name),
             ("contenuto", path),
             base_url=FIRMWARE_API_BASE,
-            include_api_key=False,
+            include_api_key=True,
         )
         if not response_ok(response):
             failed += 1

@@ -70,6 +70,12 @@ TaskHandle_t Task0_handle = NULL;
 TaskHandle_t Task1_handle = NULL;
 TaskHandle_t Task2_handle = NULL;
 
+static RuntimeModelRegistry runtimeModelRegistry = {};
+RTC_NOINIT_ATTR RuntimeFeatureHistory runtimeFeatureHistory;
+static uint32_t runtimeModelsCheckedAtEpoch = 0;
+static unsigned long runtimeModelsLastFetchAttemptMs = 0;
+static uint32_t runtimeHistoryStorageSequence = 0;
+
 // Semaforo sincronizzazione sweep -> manager
 static SemaphoreHandle_t sweepDoneSem = NULL;
 
@@ -1021,6 +1027,10 @@ void setup()
     // Inizializzazione GPS
     GPSsensor = init_gps();
     init_spiffs();
+    runtime_model_registry_reset(runtimeModelRegistry);
+    runtime_history_ensure_valid(runtimeFeatureHistory);
+    load_runtime_history_from_storage();
+    load_runtime_models_from_storage();
 
     vTaskDelay(pdMS_TO_TICKS(SERIAL_CONFIG::DELAY_SHORT));
 
@@ -1542,6 +1552,15 @@ void loop_monitoring(void *pvParameters)
             send_sensors_diagnostics();
         }
 
+        const time_t modelClock = time(nullptr);
+        const uint32_t modelNowEpoch = modelClock > 0 ? static_cast<uint32_t>(modelClock) : 0;
+        register_runtime_model_targets();
+        if (WiFi.status() == WL_CONNECTED &&
+            runtime_models_refresh_due(modelNowEpoch))
+        {
+            fetch_runtime_models(modelNowEpoch);
+        }
+
         // === LETTURA SENSORI ===
         bool wifiPausedForExtraction = false;
         if (conf && !AP)
@@ -1553,6 +1572,7 @@ void loop_monitoring(void *pvParameters)
         doc.clear();
         PollutantsMissing.clear(); // DEDUPLICA: Reset lista pollutanti mancanti
         pmAe1_0 = pmAe2_5 = pmAe10_0 = 0;
+        multigas_raw_read_ok = false;
 
         // In modalità LOW POWER: leggi solo in cicli di lettura (ogni 5 cicli)
         if (low && !isReadCycle)
@@ -2109,6 +2129,7 @@ void loop_monitoring(void *pvParameters)
         }
 
         doc["num_devices_sniffed"] = num_devices_sniffed;
+        apply_runtime_models_to_document(static_cast<uint32_t>(epochs));
 
         // Verifica pollutant mancanti
         for (size_t i = 0; i < Pollutants.size(); ++i)
@@ -3673,6 +3694,9 @@ void read_multigas()
     uint32_t raw_no2 = sensore.getGM102B();
     uint32_t raw_co  = sensore.getGM702B();
     uint32_t raw_voc = sensore.getGM502B();
+    multigas_raw_no2 = raw_no2;
+    multigas_raw_voc = raw_voc;
+    multigas_raw_read_ok = true;
 
     float no2_voltage = raw_no2 / 100.0f;
     float co_voltage  = raw_co  / 100.0f;
@@ -5817,6 +5841,1043 @@ void check_sensors_diagnostics()
 // ============================================================================
 // SEZIONE 22: FUNZIONI SERVER E CONFIGURAZIONE REMOTA
 // ============================================================================
+
+static bool runtime_model_epoch_valid(uint32_t epoch)
+{
+    return epoch >= 946684800UL; // 2000-01-01 UTC
+}
+
+static bool runtime_model_copy_string(JsonVariantConst value, char *destination,
+                                      size_t destinationSize)
+{
+    if (!value.is<const char *>())
+    {
+        return false;
+    }
+    const char *source = value.as<const char *>();
+    if (source == nullptr || source[0] == '\0' || strlen(source) >= destinationSize)
+    {
+        return false;
+    }
+    snprintf(destination, destinationSize, "%s", source);
+    return true;
+}
+
+static bool runtime_model_output_field_valid(const char *field)
+{
+    if (field == nullptr || field[0] == '\0')
+    {
+        return false;
+    }
+    for (size_t i = 0; field[i] != '\0'; ++i)
+    {
+        const char c = field[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool runtime_model_read_float(JsonObjectConst object, const char *key, float &value)
+{
+    JsonVariantConst variant = object[key];
+    if (!variant.is<float>() && !variant.is<double>() && !variant.is<long>() &&
+        !variant.is<unsigned long>())
+    {
+        return false;
+    }
+    value = variant.as<float>();
+    return isfinite(value);
+}
+
+static bool runtime_model_read_u32(JsonObjectConst object, const char *key, uint32_t &value)
+{
+    JsonVariantConst variant = object[key];
+    if (!variant.is<uint32_t>())
+    {
+        return false;
+    }
+    value = variant.as<uint32_t>();
+    return true;
+}
+
+static bool parse_runtime_model_object(JsonObjectConst root, RuntimeModel &parsedModel,
+                                       String &parseError)
+{
+    if (root.isNull())
+    {
+        parseError = "root must be an object";
+        return false;
+    }
+    if (!root["schema_version"].is<uint16_t>() ||
+        root["schema_version"].as<uint16_t>() != RUNTIME_MODEL_CONTRACT::SCHEMA_VERSION)
+    {
+        parseError = "unsupported schema_version";
+        return false;
+    }
+    if (!root["enabled"].is<bool>())
+    {
+        parseError = "enabled must be boolean";
+        return false;
+    }
+
+    RuntimeModel candidate = runtime_model_defaults();
+    candidate.enabled = root["enabled"].as<bool>();
+    if (!runtime_model_copy_string(root["model_id"], candidate.modelId,
+                                   sizeof(candidate.modelId)))
+    {
+        parseError = "model_id missing or too long";
+        return false;
+    }
+
+    if (!candidate.enabled)
+    {
+        parsedModel = candidate;
+        return true;
+    }
+
+    JsonObjectConst output = root["output"].as<JsonObjectConst>();
+    if (output.isNull() ||
+        !runtime_model_copy_string(output["field"], candidate.outputField,
+                                   sizeof(candidate.outputField)) ||
+        !runtime_model_output_field_valid(candidate.outputField) ||
+        !runtime_model_copy_string(output["unit"], candidate.outputUnit,
+                                   sizeof(candidate.outputUnit)))
+    {
+        parseError = "invalid output field/unit";
+        return false;
+    }
+
+    JsonVariantConst clampMin = output["clamp_min"];
+    if (!clampMin.isNull())
+    {
+        candidate.clampMinEnabled = runtime_model_read_float(output, "clamp_min",
+                                                             candidate.outputClampMin);
+        if (!candidate.clampMinEnabled)
+        {
+            parseError = "invalid output.clamp_min";
+            return false;
+        }
+    }
+    JsonVariantConst clampMax = output["clamp_max"];
+    if (!clampMax.isNull())
+    {
+        candidate.clampMaxEnabled = runtime_model_read_float(output, "clamp_max",
+                                                             candidate.outputClampMax);
+        if (!candidate.clampMaxEnabled)
+        {
+            parseError = "invalid output.clamp_max";
+            return false;
+        }
+    }
+    if (candidate.clampMinEnabled && candidate.clampMaxEnabled &&
+        candidate.outputClampMin > candidate.outputClampMax)
+    {
+        parseError = "output clamp_min greater than clamp_max";
+        return false;
+    }
+
+    JsonObjectConst inputs = root["inputs"].as<JsonObjectConst>();
+    JsonObjectConst no2Input = inputs["multigas_no2_raw"].as<JsonObjectConst>();
+    JsonObjectConst vocInput = inputs["multigas_voc_raw"].as<JsonObjectConst>();
+    if (inputs.isNull() || no2Input.isNull() || vocInput.isNull())
+    {
+        parseError = "inputs missing";
+        return false;
+    }
+
+    const char *no2Source = no2Input["source"] | "";
+    const char *vocSource = vocInput["source"] | "";
+    const char *temperatureSource = inputs["temperature_source"] | "";
+    const char *humiditySource = inputs["humidity_source"] | "";
+    if (strcmp(no2Source, "GM102B") != 0 || strcmp(vocSource, "GM502B") != 0 ||
+        strcmp(temperatureSource, "published_temperatura") != 0 ||
+        strcmp(humiditySource, "published_umidita") != 0)
+    {
+        parseError = "unsupported input source";
+        return false;
+    }
+    if (!runtime_model_read_float(no2Input, "scale", candidate.no2RawScale) ||
+        !runtime_model_read_float(no2Input, "offset", candidate.no2RawOffset) ||
+        !runtime_model_read_float(vocInput, "scale", candidate.vocRawScale) ||
+        !runtime_model_read_float(vocInput, "offset", candidate.vocRawOffset) ||
+        candidate.no2RawScale == 0.0f || candidate.vocRawScale == 0.0f ||
+        !runtime_model_read_u32(inputs, "elapsed_days_origin_epoch",
+                                candidate.elapsedDaysOriginEpoch) ||
+        !runtime_model_epoch_valid(candidate.elapsedDaysOriginEpoch))
+    {
+        parseError = "invalid input scale/offset/origin";
+        return false;
+    }
+
+    JsonObjectConst history = root["history"].as<JsonObjectConst>();
+    uint32_t minimumRollingSamples = 0;
+    if (history.isNull() ||
+        !runtime_model_read_u32(history, "sample_period_seconds",
+                                candidate.historySamplePeriodSeconds) ||
+        !runtime_model_read_u32(history, "lag_1_seconds", candidate.lag1Seconds) ||
+        !runtime_model_read_u32(history, "lag_2_seconds", candidate.lag2Seconds) ||
+        !runtime_model_read_u32(history, "rolling_window_seconds",
+                                candidate.rollingWindowSeconds) ||
+        !runtime_model_read_u32(history, "lag_tolerance_seconds",
+                                candidate.lagToleranceSeconds) ||
+        !runtime_model_read_u32(history, "minimum_rolling_samples", minimumRollingSamples) ||
+        !history["require_full_rolling_window"].is<bool>())
+    {
+        parseError = "invalid history configuration";
+        return false;
+    }
+    candidate.requireFullRollingWindow = history["require_full_rolling_window"].as<bool>();
+    if (candidate.historySamplePeriodSeconds == 0 || candidate.lag1Seconds == 0 ||
+        candidate.lag2Seconds <= candidate.lag1Seconds ||
+        candidate.historySamplePeriodSeconds > candidate.rollingWindowSeconds ||
+        candidate.rollingWindowSeconds < candidate.lag2Seconds ||
+        candidate.rollingWindowSeconds / candidate.historySamplePeriodSeconds + 2U >
+            RUNTIME_MODEL_CONTRACT::HISTORY_CAPACITY ||
+        candidate.lagToleranceSeconds == 0 ||
+        candidate.lagToleranceSeconds >= candidate.lag1Seconds ||
+        minimumRollingSamples == 0 ||
+        minimumRollingSamples > RUNTIME_MODEL_CONTRACT::HISTORY_CAPACITY ||
+        minimumRollingSamples >
+            candidate.rollingWindowSeconds / candidate.historySamplePeriodSeconds + 1U)
+    {
+        parseError = "history values outside supported range";
+        return false;
+    }
+    candidate.minimumRollingSamples = static_cast<uint16_t>(minimumRollingSamples);
+
+    if (!runtime_model_read_float(root, "temperature_threshold_c",
+                                  candidate.temperatureThresholdC))
+    {
+        parseError = "invalid temperature_threshold_c";
+        return false;
+    }
+    if (!runtime_model_read_u32(root, "refresh_after_seconds",
+                                candidate.refreshAfterSeconds) ||
+        candidate.refreshAfterSeconds < RUNTIME_MODEL_CONTRACT::MIN_REFRESH_SECONDS ||
+        candidate.refreshAfterSeconds > RUNTIME_MODEL_CONTRACT::MAX_REFRESH_SECONDS)
+    {
+        parseError = "refresh_after_seconds outside supported range";
+        return false;
+    }
+
+    JsonObjectConst coefficients = root["coefficients"].as<JsonObjectConst>();
+    RuntimeModelCoefficients &c = candidate.coefficients;
+    if (coefficients.isNull() ||
+        !runtime_model_read_float(coefficients, "intercept", c.intercept) ||
+        !runtime_model_read_float(coefficients, "no2_raw", c.no2Raw) ||
+        !runtime_model_read_float(coefficients, "voc_raw", c.vocRaw) ||
+        !runtime_model_read_float(coefficients, "temperature", c.temperature) ||
+        !runtime_model_read_float(coefficients, "humidity", c.humidity) ||
+        !runtime_model_read_float(coefficients, "no2_raw_lag_1", c.no2RawLag1) ||
+        !runtime_model_read_float(coefficients, "no2_raw_lag_2", c.no2RawLag2) ||
+        !runtime_model_read_float(coefficients, "no2_raw_rolling", c.no2RawRolling) ||
+        !runtime_model_read_float(coefficients, "voc_raw_lag_1", c.vocRawLag1) ||
+        !runtime_model_read_float(coefficients, "voc_raw_lag_2", c.vocRawLag2) ||
+        !runtime_model_read_float(coefficients, "voc_raw_rolling", c.vocRawRolling) ||
+        !runtime_model_read_float(coefficients, "elapsed_days", c.elapsedDays) ||
+        !runtime_model_read_float(coefficients, "no2_raw_squared", c.no2RawSquared) ||
+        !runtime_model_read_float(coefficients, "no2_raw_temperature", c.no2RawTemperature) ||
+        !runtime_model_read_float(coefficients, "no2_raw_humidity", c.no2RawHumidity) ||
+        !runtime_model_read_float(coefficients, "voc_raw_squared", c.vocRawSquared) ||
+        !runtime_model_read_float(coefficients, "voc_raw_temperature", c.vocRawTemperature) ||
+        !runtime_model_read_float(coefficients, "voc_raw_humidity", c.vocRawHumidity) ||
+        !runtime_model_read_float(coefficients, "temperature_above_threshold",
+                                  c.temperatureAboveThreshold))
+    {
+        parseError = "coefficients missing or non-numeric";
+        return false;
+    }
+
+    parsedModel = candidate;
+    return true;
+}
+
+static bool parse_runtime_model_payload(const String &payload, RuntimeModel &parsedModel,
+                                        String &parseError)
+{
+    JsonDocument parsed;
+    DeserializationError jsonError = deserializeJson(parsed, payload);
+    if (jsonError)
+    {
+        parseError = String("invalid JSON: ") + jsonError.c_str();
+        return false;
+    }
+    return parse_runtime_model_object(parsed.as<JsonObjectConst>(), parsedModel, parseError);
+}
+
+static bool runtime_model_target_allowed(const char *pollutant);
+
+namespace
+{
+constexpr const char *RUNTIME_MODELS_SLOT_A = "/rms_a.bin";
+constexpr const char *RUNTIME_MODELS_SLOT_B = "/rms_b.bin";
+constexpr uint32_t RUNTIME_MODELS_STORAGE_MAGIC = 0x534D5342UL; // "SMSB"
+constexpr uint16_t RUNTIME_MODELS_STORAGE_VERSION = 2;
+constexpr size_t RUNTIME_MODELS_MAX_PAYLOAD_BYTES = 65536;
+constexpr const char *RUNTIME_HISTORY_SLOT_A = "/rhist_a.bin";
+constexpr const char *RUNTIME_HISTORY_SLOT_B = "/rhist_b.bin";
+
+struct RuntimeModelsStorageHeader
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t sequence;
+    uint32_t deviceIdHash;
+    uint32_t checkedAtEpoch;
+    uint32_t payloadLength;
+    uint32_t checksum;
+};
+
+struct RuntimeHistoryStorageRecord
+{
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
+    uint32_t sequence;
+    RuntimeFeatureHistory history;
+    uint32_t checksum;
+};
+
+uint32_t runtime_storage_checksum(const uint8_t *bytes, size_t length)
+{
+    uint32_t hash = 2166136261UL;
+    for (size_t i = 0; i < length; ++i)
+    {
+        hash ^= bytes[i];
+        hash *= 16777619UL;
+    }
+    return hash;
+}
+
+uint32_t runtime_current_device_hash()
+{
+    return runtime_storage_checksum(
+        reinterpret_cast<const uint8_t *>(topic.c_str()), topic.length());
+}
+
+bool read_runtime_history_slot(const char *path, RuntimeHistoryStorageRecord &record)
+{
+    if (!spiffsReady || !SPIFFS.exists(path))
+    {
+        return false;
+    }
+    File file = SPIFFS.open(path, FILE_READ);
+    if (!file || file.size() != sizeof(record))
+    {
+        if (file)
+            file.close();
+        return false;
+    }
+    const size_t read = file.read(reinterpret_cast<uint8_t *>(&record), sizeof(record));
+    file.close();
+    const uint32_t expected = runtime_history_checksum(record.history) ^ record.sequence;
+    return read == sizeof(record) &&
+           record.magic == RUNTIME_MODEL_CONTRACT::HISTORY_STORAGE_MAGIC &&
+           record.version == RUNTIME_MODEL_CONTRACT::HISTORY_STORAGE_VERSION &&
+           runtime_history_valid(record.history) && record.checksum == expected;
+}
+
+bool read_runtime_models_slot(const char *path, RuntimeModelsStorageHeader &header,
+                              String &payload)
+{
+    if (!spiffsReady || !SPIFFS.exists(path))
+    {
+        return false;
+    }
+    File file = SPIFFS.open(path, FILE_READ);
+    if (!file || file.size() < sizeof(header))
+    {
+        if (file)
+            file.close();
+        return false;
+    }
+    if (file.read(reinterpret_cast<uint8_t *>(&header), sizeof(header)) != sizeof(header) ||
+        header.magic != RUNTIME_MODELS_STORAGE_MAGIC ||
+        header.version != RUNTIME_MODELS_STORAGE_VERSION ||
+        header.deviceIdHash != runtime_current_device_hash() ||
+        header.payloadLength == 0 ||
+        header.payloadLength > RUNTIME_MODELS_MAX_PAYLOAD_BYTES ||
+        file.size() != sizeof(header) + header.payloadLength)
+    {
+        file.close();
+        return false;
+    }
+
+    payload = file.readString();
+    file.close();
+    const uint32_t expectedChecksum =
+        runtime_storage_checksum(reinterpret_cast<const uint8_t *>(payload.c_str()),
+                                 payload.length()) ^
+        header.deviceIdHash ^ header.sequence;
+    return payload.length() == header.payloadLength &&
+           expectedChecksum == header.checksum;
+}
+}
+
+bool persist_runtime_history()
+{
+    if (!spiffsReady || !runtime_history_valid(runtimeFeatureHistory))
+    {
+        return false;
+    }
+
+    RuntimeHistoryStorageRecord record = {};
+    record.magic = RUNTIME_MODEL_CONTRACT::HISTORY_STORAGE_MAGIC;
+    record.version = RUNTIME_MODEL_CONTRACT::HISTORY_STORAGE_VERSION;
+    record.sequence = runtimeHistoryStorageSequence + 1U;
+    record.history = runtimeFeatureHistory;
+    record.checksum = runtime_history_checksum(record.history) ^ record.sequence;
+    const char *path = (record.sequence & 1U) ? RUNTIME_HISTORY_SLOT_A
+                                              : RUNTIME_HISTORY_SLOT_B;
+    File file = SPIFFS.open(path, FILE_WRITE);
+    if (!file)
+    {
+        return false;
+    }
+    const size_t written = file.write(reinterpret_cast<const uint8_t *>(&record),
+                                      sizeof(record));
+    file.close();
+    if (written != sizeof(record))
+    {
+        return false;
+    }
+    runtimeHistoryStorageSequence = record.sequence;
+    return true;
+}
+
+bool load_runtime_history_from_storage()
+{
+    RuntimeHistoryStorageRecord first = {};
+    RuntimeHistoryStorageRecord second = {};
+    const bool firstValid = read_runtime_history_slot(RUNTIME_HISTORY_SLOT_A, first);
+    const bool secondValid = read_runtime_history_slot(RUNTIME_HISTORY_SLOT_B, second);
+    if (!firstValid && !secondValid)
+    {
+        return false;
+    }
+
+    const RuntimeHistoryStorageRecord &selected =
+        !firstValid ? second : (!secondValid || first.sequence >= second.sequence ? first : second);
+    runtimeHistoryStorageSequence = selected.sequence;
+    const int rtcLatest = runtime_history_latest_index(runtimeFeatureHistory);
+    const int storedLatest = runtime_history_latest_index(selected.history);
+    const uint32_t rtcEpoch = rtcLatest >= 0 ? runtimeFeatureHistory.samples[rtcLatest].epoch : 0;
+    const uint32_t storedEpoch = storedLatest >= 0 ? selected.history.samples[storedLatest].epoch : 0;
+    if (storedEpoch > rtcEpoch ||
+        (storedEpoch == rtcEpoch && selected.history.count > runtimeFeatureHistory.count))
+    {
+        runtimeFeatureHistory = selected.history;
+    }
+    Serial.printf("[MODEL][HISTORY] Persistent history loaded samples=%u\n",
+                  runtimeFeatureHistory.count);
+    return true;
+}
+
+static bool parse_runtime_models_response(const String &payload,
+                                          RuntimeModelRegistry &parsedRegistry,
+                                          String &parseError)
+{
+    JsonDocument parsed;
+    DeserializationError jsonError = deserializeJson(parsed, payload);
+    if (jsonError)
+    {
+        parseError = String("invalid JSON: ") + jsonError.c_str();
+        return false;
+    }
+    JsonObjectConst models = parsed.as<JsonObjectConst>();
+    if (models.isNull() || models.size() > RUNTIME_MODEL_CONTRACT::MAX_MODELS)
+    {
+        parseError = "invalid models object";
+        return false;
+    }
+
+    runtime_model_registry_reset(parsedRegistry);
+    for (JsonPairConst entry : models)
+    {
+        const char *pollutant = entry.key().c_str();
+        JsonObjectConst modelObject = entry.value().as<JsonObjectConst>();
+        if (!runtime_model_target_allowed(pollutant) ||
+            modelObject.isNull() ||
+            runtime_model_registry_find(parsedRegistry, pollutant) >= 0)
+        {
+            parseError = "invalid or duplicate pollutant";
+            return false;
+        }
+        const int index = runtime_model_registry_add(parsedRegistry, pollutant);
+        if (index < 0)
+        {
+            parseError = "model registry full";
+            return false;
+        }
+        RuntimeModel model = runtime_model_defaults();
+        if (!parse_runtime_model_object(modelObject, model, parseError))
+        {
+            return false;
+        }
+        if (model.enabled && strcmp(model.outputField, pollutant) != 0)
+        {
+            parseError = "model output mismatch";
+            return false;
+        }
+        RuntimeModelSlot &slot = parsedRegistry.slots[index];
+        slot.model = model;
+        slot.loaded = true;
+        slot.storageChecked = true;
+    }
+
+    return true;
+}
+
+static bool persist_runtime_models_response(const String &payload, uint32_t checkedAtEpoch)
+{
+    if (!spiffsReady || payload.length() == 0 ||
+        payload.length() > RUNTIME_MODELS_MAX_PAYLOAD_BYTES)
+    {
+        return false;
+    }
+    static uint32_t storageSequence = 0;
+    RuntimeModelsStorageHeader firstHeader = {};
+    RuntimeModelsStorageHeader secondHeader = {};
+    String ignored;
+    if (read_runtime_models_slot(RUNTIME_MODELS_SLOT_A, firstHeader, ignored))
+        storageSequence = firstHeader.sequence > storageSequence ? firstHeader.sequence : storageSequence;
+    ignored = String();
+    if (read_runtime_models_slot(RUNTIME_MODELS_SLOT_B, secondHeader, ignored))
+        storageSequence = secondHeader.sequence > storageSequence ? secondHeader.sequence : storageSequence;
+
+    RuntimeModelsStorageHeader header = {};
+    header.magic = RUNTIME_MODELS_STORAGE_MAGIC;
+    header.version = RUNTIME_MODELS_STORAGE_VERSION;
+    header.sequence = storageSequence + 1U;
+    header.deviceIdHash = runtime_current_device_hash();
+    header.checkedAtEpoch = checkedAtEpoch;
+    header.payloadLength = payload.length();
+    header.checksum = runtime_storage_checksum(
+                          reinterpret_cast<const uint8_t *>(payload.c_str()),
+                          payload.length()) ^
+                      header.deviceIdHash ^ header.sequence;
+    const char *path = (header.sequence & 1U) ? RUNTIME_MODELS_SLOT_A
+                                              : RUNTIME_MODELS_SLOT_B;
+    File file = SPIFFS.open(path, FILE_WRITE);
+    if (!file)
+    {
+        return false;
+    }
+    const size_t headerWritten = file.write(reinterpret_cast<const uint8_t *>(&header),
+                                            sizeof(header));
+    const size_t payloadWritten = file.write(
+        reinterpret_cast<const uint8_t *>(payload.c_str()), payload.length());
+    file.close();
+    if (headerWritten != sizeof(header) || payloadWritten != payload.length())
+    {
+        return false;
+    }
+    storageSequence = header.sequence;
+    return true;
+}
+
+bool load_runtime_models_from_storage()
+{
+    RuntimeModelsStorageHeader firstHeader = {};
+    RuntimeModelsStorageHeader secondHeader = {};
+    String firstPayload;
+    String secondPayload;
+    const bool firstValid = read_runtime_models_slot(RUNTIME_MODELS_SLOT_A, firstHeader,
+                                                     firstPayload);
+    const bool secondValid = read_runtime_models_slot(RUNTIME_MODELS_SLOT_B, secondHeader,
+                                                      secondPayload);
+    if (!firstValid && !secondValid)
+    {
+        return false;
+    }
+    const bool useFirst = firstValid && (!secondValid || firstHeader.sequence >= secondHeader.sequence);
+    const RuntimeModelsStorageHeader &header = useFirst ? firstHeader : secondHeader;
+    const String &payload = useFirst ? firstPayload : secondPayload;
+
+    RuntimeModelRegistry parsedRegistry = {};
+    String parseError;
+    if (!parse_runtime_models_response(payload, parsedRegistry, parseError))
+    {
+        Serial.printf("ERROR: [MODEL] Cached bundle rejected: %s\n", parseError.c_str());
+        return false;
+    }
+    runtimeModelRegistry = parsedRegistry;
+    runtimeModelsCheckedAtEpoch = runtime_model_epoch_valid(header.checkedAtEpoch)
+                                      ? header.checkedAtEpoch
+                                      : 0;
+    for (size_t i = 0; i < runtimeModelRegistry.count; ++i)
+    {
+        runtimeModelRegistry.slots[i].checkedAtEpoch = runtimeModelsCheckedAtEpoch;
+    }
+    Serial.printf("[MODEL] Cached bundle loaded models=%u\n",
+                  static_cast<unsigned>(runtimeModelRegistry.count));
+    return true;
+}
+
+static String runtime_model_storage_path(const RuntimeModelSlot &slot, const char *suffix)
+{
+    return String("/rm_") + slot.pollutant + suffix;
+}
+
+static bool write_runtime_model_meta(size_t modelIndex, uint32_t checkedAtEpoch)
+{
+    if (!spiffsReady || modelIndex >= runtimeModelRegistry.count ||
+        !runtime_model_epoch_valid(checkedAtEpoch))
+    {
+        return false;
+    }
+    const String metaPath = runtime_model_storage_path(runtimeModelRegistry.slots[modelIndex],
+                                                       ".meta");
+    File meta = SPIFFS.open(metaPath.c_str(), FILE_WRITE);
+    if (!meta)
+    {
+        return false;
+    }
+    const size_t written = meta.print(checkedAtEpoch);
+    meta.close();
+    return written > 0;
+}
+
+static bool persist_runtime_model_payload(size_t modelIndex, const String &payload,
+                                          uint32_t checkedAtEpoch)
+{
+    if (!spiffsReady || modelIndex >= runtimeModelRegistry.count)
+    {
+        return false;
+    }
+
+    RuntimeModelSlot &slot = runtimeModelRegistry.slots[modelIndex];
+    const String modelPath = runtime_model_storage_path(slot, ".json");
+    const String temporaryPath = runtime_model_storage_path(slot, ".tmp");
+    const String metaPath = runtime_model_storage_path(slot, ".meta");
+    File temporary = SPIFFS.open(temporaryPath.c_str(), FILE_WRITE);
+    if (!temporary)
+    {
+        return false;
+    }
+    const size_t written = temporary.print(payload);
+    temporary.close();
+    if (written != payload.length())
+    {
+        SPIFFS.remove(temporaryPath.c_str());
+        return false;
+    }
+
+    SPIFFS.remove(modelPath.c_str());
+    if (!SPIFFS.rename(temporaryPath.c_str(), modelPath.c_str()))
+    {
+        SPIFFS.remove(temporaryPath.c_str());
+        return false;
+    }
+    if (runtime_model_epoch_valid(checkedAtEpoch))
+    {
+        write_runtime_model_meta(modelIndex, checkedAtEpoch);
+    }
+    else
+    {
+        SPIFFS.remove(metaPath.c_str());
+    }
+    return true;
+}
+
+bool load_runtime_model_from_storage(size_t modelIndex)
+{
+    if (modelIndex >= runtimeModelRegistry.count)
+    {
+        return false;
+    }
+
+    RuntimeModelSlot &slot = runtimeModelRegistry.slots[modelIndex];
+    slot.storageChecked = true;
+    const String modelPath = runtime_model_storage_path(slot, ".json");
+    const String metaPath = runtime_model_storage_path(slot, ".meta");
+
+    if (spiffsReady && SPIFFS.exists(metaPath.c_str()))
+    {
+        File meta = SPIFFS.open(metaPath.c_str(), FILE_READ);
+        if (meta)
+        {
+            slot.checkedAtEpoch = static_cast<uint32_t>(meta.parseInt());
+            meta.close();
+            if (!runtime_model_epoch_valid(slot.checkedAtEpoch))
+            {
+                slot.checkedAtEpoch = 0;
+            }
+        }
+    }
+
+    if (!spiffsReady || !SPIFFS.exists(modelPath.c_str()))
+    {
+        return false;
+    }
+
+    File modelFile = SPIFFS.open(modelPath.c_str(), FILE_READ);
+    if (!modelFile || modelFile.size() == 0 || modelFile.size() > 8192)
+    {
+        if (modelFile)
+            modelFile.close();
+        Serial.printf("ERROR: [MODEL][%s] Cached model file invalid\n", slot.pollutant);
+        return false;
+    }
+    String payload = modelFile.readString();
+    modelFile.close();
+
+    RuntimeModel parsedModel = runtime_model_defaults();
+    String parseError;
+    if (!parse_runtime_model_payload(payload, parsedModel, parseError))
+    {
+        Serial.printf("ERROR: [MODEL][%s] Cached model rejected: %s\n",
+                      slot.pollutant, parseError.c_str());
+        return false;
+    }
+    if (parsedModel.enabled && strcmp(parsedModel.outputField, slot.pollutant) != 0)
+    {
+        Serial.printf("ERROR: [MODEL][%s] Cached output mismatch: %s\n",
+                      slot.pollutant, parsedModel.outputField);
+        return false;
+    }
+
+    slot.model = parsedModel;
+    slot.loaded = true;
+
+    Serial.printf("[MODEL][%s] Cached model loaded id=%s enabled=%d\n",
+                  slot.pollutant, slot.model.modelId, slot.model.enabled);
+    return true;
+}
+
+static bool runtime_model_target_allowed(const char *pollutant)
+{
+    static const char *const allowed[] = {
+        "c2h5oh", "c6h6", "co", "co2", "nh3", "no2", "nox_index",
+        "o3", "pm1", "pm10", "pm2_5", "so2", "voc", "voc_index"};
+    for (const char *candidate : allowed)
+    {
+        if (strcmp(candidate, pollutant) == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void register_runtime_model_target(const char *pollutant)
+{
+    if (!runtime_model_target_allowed(pollutant) ||
+        runtime_model_registry_find(runtimeModelRegistry, pollutant) >= 0)
+    {
+        return;
+    }
+    const int modelIndex = runtime_model_registry_add(runtimeModelRegistry, pollutant);
+    if (modelIndex < 0)
+    {
+        Serial.printf("ERROR: [MODEL] Registry full; cannot add %s\n", pollutant);
+        return;
+    }
+}
+
+void register_runtime_model_targets()
+{
+    for (size_t i = 0; i < Pollutants.size(); ++i)
+    {
+        register_runtime_model_target(Pollutants[i]);
+    }
+    if (gas)
+    {
+        // C6H6 is calibrated from the Multigas GM502B VOC raw channel.
+        register_runtime_model_target("c6h6");
+    }
+}
+
+bool runtime_model_refresh_due(size_t modelIndex, uint32_t currentEpoch)
+{
+    if (modelIndex >= runtimeModelRegistry.count)
+    {
+        return false;
+    }
+    RuntimeModelSlot &slot = runtimeModelRegistry.slots[modelIndex];
+    const unsigned long retryIntervalMs = RUNTIME_MODEL_CONTRACT::MIN_REFRESH_SECONDS * 1000UL;
+    if (slot.lastFetchAttemptMs != 0 &&
+        millis() - slot.lastFetchAttemptMs < retryIntervalMs)
+    {
+        return false;
+    }
+    if (!runtime_model_epoch_valid(currentEpoch) ||
+        !runtime_model_epoch_valid(slot.checkedAtEpoch))
+    {
+        return slot.checkedAtEpoch == 0;
+    }
+    if (currentEpoch < slot.checkedAtEpoch)
+    {
+        return true;
+    }
+    const uint32_t refreshSeconds = slot.loaded
+                                        ? slot.model.refreshAfterSeconds
+                                        : RUNTIME_MODEL_CONTRACT::DEFAULT_REFRESH_SECONDS;
+    return currentEpoch - slot.checkedAtEpoch >= refreshSeconds;
+}
+
+bool fetch_runtime_model(size_t modelIndex, uint32_t currentEpoch)
+{
+    if (modelIndex >= runtimeModelRegistry.count)
+    {
+        return false;
+    }
+    RuntimeModelSlot &slot = runtimeModelRegistry.slots[modelIndex];
+    slot.lastFetchAttemptMs = millis();
+    String resource = String(HTTP_CONTRACT::RUNTIME_MODEL_ROUTE) +
+                      "?ID=" + urlencode(topic) +
+                      "&Pollutant=" + urlencode(String(slot.pollutant));
+
+    WiFiClient runtimeModelHttpClient;
+    HttpClient http(runtimeModelHttpClient, host, port);
+    http.setHttpResponseTimeout(5000);
+    const int error = http.get(resource);
+    if (error != 0)
+    {
+        Serial.printf("ERROR: [HTTP][MODEL][%s] client_error=%d\n",
+                      slot.pollutant, error);
+        return false;
+    }
+
+    const int status = http.responseStatusCode();
+    String response = http.responseBody();
+    if (status != 200)
+    {
+        if (status == 404 && runtime_model_epoch_valid(currentEpoch))
+        {
+            slot.checkedAtEpoch = currentEpoch;
+            write_runtime_model_meta(modelIndex, currentEpoch);
+        }
+        char responsePreview[257];
+        make_http_body_preview(response, responsePreview, sizeof(responsePreview));
+        Serial.printf("[HTTP][MODEL][%s] status=%d body=%s\n", slot.pollutant, status,
+                      responsePreview[0] ? responsePreview : "<empty>");
+        return false;
+    }
+    if (response.length() == 0 || response.length() > 8192)
+    {
+        Serial.printf("ERROR: [HTTP][MODEL][%s] response size invalid: %u\n",
+                      slot.pollutant, static_cast<unsigned>(response.length()));
+        return false;
+    }
+
+    RuntimeModel parsedModel = runtime_model_defaults();
+    String parseError;
+    if (!parse_runtime_model_payload(response, parsedModel, parseError))
+    {
+        Serial.printf("ERROR: [HTTP][MODEL][%s] rejected: %s\n",
+                      slot.pollutant, parseError.c_str());
+        return false;
+    }
+    if (parsedModel.enabled && strcmp(parsedModel.outputField, slot.pollutant) != 0)
+    {
+        Serial.printf("ERROR: [HTTP][MODEL][%s] output mismatch: %s\n",
+                      slot.pollutant, parsedModel.outputField);
+        return false;
+    }
+
+    slot.model = parsedModel;
+    slot.loaded = true;
+    slot.checkedAtEpoch = runtime_model_epoch_valid(currentEpoch) ? currentEpoch : 0;
+    if (!persist_runtime_model_payload(modelIndex, response, slot.checkedAtEpoch))
+    {
+        Serial.printf("WARNING: [MODEL][%s] Active model not persisted\n", slot.pollutant);
+    }
+    Serial.printf("[HTTP][MODEL][%s] status=200 id=%s enabled=%d\n",
+                  slot.pollutant, slot.model.modelId, slot.model.enabled);
+    return true;
+}
+
+bool runtime_models_refresh_due(uint32_t currentEpoch)
+{
+    const unsigned long retryIntervalMs = RUNTIME_MODEL_CONTRACT::MIN_REFRESH_SECONDS * 1000UL;
+    if (runtimeModelsLastFetchAttemptMs != 0 &&
+        millis() - runtimeModelsLastFetchAttemptMs < retryIntervalMs)
+    {
+        return false;
+    }
+    if (!runtime_model_epoch_valid(currentEpoch) ||
+        !runtime_model_epoch_valid(runtimeModelsCheckedAtEpoch))
+    {
+        return runtimeModelsCheckedAtEpoch == 0;
+    }
+    if (currentEpoch < runtimeModelsCheckedAtEpoch)
+    {
+        return true;
+    }
+
+    uint32_t refreshSeconds = RUNTIME_MODEL_CONTRACT::DEFAULT_REFRESH_SECONDS;
+    for (size_t i = 0; i < runtimeModelRegistry.count; ++i)
+    {
+        const RuntimeModelSlot &slot = runtimeModelRegistry.slots[i];
+        if (slot.loaded && slot.model.refreshAfterSeconds < refreshSeconds)
+        {
+            refreshSeconds = slot.model.refreshAfterSeconds;
+        }
+    }
+    return currentEpoch - runtimeModelsCheckedAtEpoch >= refreshSeconds;
+}
+
+bool fetch_runtime_models(uint32_t currentEpoch)
+{
+    runtimeModelsLastFetchAttemptMs = millis();
+    const String resource = String(HTTP_CONTRACT::RUNTIME_MODELS_ROUTE) +
+                            "?ID=" + urlencode(topic);
+
+    WiFiClient runtimeModelHttpClient;
+    HttpClient http(runtimeModelHttpClient, host, port);
+    http.setHttpResponseTimeout(10000);
+    const int error = http.get(resource);
+    if (error != 0)
+    {
+        Serial.printf("ERROR: [HTTP][MODELS] client_error=%d\n", error);
+        return false;
+    }
+
+    const int status = http.responseStatusCode();
+    String response = http.responseBody();
+    if (status != 200)
+    {
+        char responsePreview[257];
+        make_http_body_preview(response, responsePreview, sizeof(responsePreview));
+        Serial.printf("[HTTP][MODELS] status=%d body=%s\n", status,
+                      responsePreview[0] ? responsePreview : "<empty>");
+        return false;
+    }
+    if (response.length() == 0 || response.length() > RUNTIME_MODELS_MAX_PAYLOAD_BYTES)
+    {
+        Serial.printf("ERROR: [HTTP][MODELS] response size invalid: %u\n",
+                      static_cast<unsigned>(response.length()));
+        return false;
+    }
+
+    RuntimeModelRegistry parsedRegistry = {};
+    String parseError;
+    if (!parse_runtime_models_response(response, parsedRegistry, parseError))
+    {
+        Serial.printf("ERROR: [HTTP][MODELS] rejected: %s\n", parseError.c_str());
+        return false;
+    }
+
+    const uint32_t checkedAtEpoch = runtime_model_epoch_valid(currentEpoch) ? currentEpoch : 0;
+    for (size_t i = 0; i < parsedRegistry.count; ++i)
+    {
+        parsedRegistry.slots[i].checkedAtEpoch = checkedAtEpoch;
+    }
+    if (!persist_runtime_models_response(response, checkedAtEpoch))
+    {
+        Serial.println("WARNING: [MODEL] Active bundle not persisted");
+    }
+    runtimeModelRegistry = parsedRegistry;
+    runtimeModelsCheckedAtEpoch = checkedAtEpoch;
+
+    Serial.printf("[HTTP][MODELS] status=200 models=%u\n",
+                  static_cast<unsigned>(runtimeModelRegistry.count));
+    return true;
+}
+
+void apply_runtime_models_to_document(uint32_t currentEpoch)
+{
+    if (!runtime_model_epoch_valid(currentEpoch))
+    {
+        return;
+    }
+    if (!multigas_raw_read_ok)
+    {
+        return;
+    }
+
+    uint32_t samplePeriod = UINT32_MAX;
+    bool hasEnabledModel = false;
+    for (size_t i = 0; i < runtimeModelRegistry.count; ++i)
+    {
+        RuntimeModelSlot &slot = runtimeModelRegistry.slots[i];
+        if (!slot.loaded)
+        {
+            continue;
+        }
+        if (slot.checkedAtEpoch == 0)
+        {
+            slot.checkedAtEpoch = currentEpoch;
+        }
+        if (slot.model.enabled)
+        {
+            hasEnabledModel = true;
+            if (slot.model.historySamplePeriodSeconds < samplePeriod)
+            {
+                samplePeriod = slot.model.historySamplePeriodSeconds;
+            }
+        }
+    }
+    if (!hasEnabledModel)
+    {
+        return;
+    }
+
+    if (runtime_history_add(runtimeFeatureHistory, currentEpoch,
+                            static_cast<float>(multigas_raw_no2),
+                            static_cast<float>(multigas_raw_voc), samplePeriod) &&
+        !persist_runtime_history())
+    {
+        Serial.println("WARNING: [MODEL][HISTORY] Sample not persisted");
+    }
+
+    if (!doc["temperatura"].is<float>() || !doc["umidita"].is<float>())
+    {
+        return;
+    }
+
+    for (size_t i = 0; i < runtimeModelRegistry.count; ++i)
+    {
+        RuntimeModelSlot &slot = runtimeModelRegistry.slots[i];
+        if (!slot.loaded || !slot.model.enabled)
+        {
+            continue;
+        }
+
+        RuntimeModelFeatures features = {};
+        const RuntimeFeatureStatus status = build_runtime_model_features(
+            slot.model, runtimeFeatureHistory, currentEpoch,
+            static_cast<float>(multigas_raw_no2), static_cast<float>(multigas_raw_voc),
+            doc["temperatura"].as<float>(), doc["umidita"].as<float>(), features);
+
+        if (status != RuntimeFeatureStatus::READY)
+        {
+            if (status != slot.lastFeatureStatus)
+            {
+                Serial.printf("[MODEL][%s] Waiting for features: %s\n",
+                              slot.pollutant, runtime_feature_status_name(status));
+            }
+            slot.lastFeatureStatus = status;
+            continue;
+        }
+
+        const float prediction = evaluate_runtime_model(slot.model, features);
+        if (!isfinite(prediction))
+        {
+            Serial.printf("ERROR: [MODEL][%s] Non-finite prediction rejected\n",
+                          slot.pollutant);
+            continue;
+        }
+
+        doc[slot.model.outputField] = prediction;
+        if (slot.lastFeatureStatus != RuntimeFeatureStatus::READY)
+        {
+            Serial.printf("[MODEL][%s] Features ready; publishing %s\n",
+                          slot.pollutant, slot.model.outputField);
+        }
+        slot.lastFeatureStatus = RuntimeFeatureStatus::READY;
+#if FW_LOG_LEVEL >= 3
+        Serial.printf("DEBUG: [MODEL][%s] id=%s value=%.6f %s\n", slot.pollutant,
+                      slot.model.modelId, prediction, slot.model.outputUnit);
+#endif
+    }
+}
 
 /**
  * Richiede ID e versione dal server remoto

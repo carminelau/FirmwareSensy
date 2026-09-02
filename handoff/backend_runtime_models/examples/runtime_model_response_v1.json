@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "enabled": true,
+  "model_id": "sha256-6f42c431df21a892",
+  "refresh_after_seconds": 21600,
+  "output": {
+    "field": "no2",
+    "unit": "ug/m3",
+    "clamp_min": null,
+    "clamp_max": null
+  },
+  "inputs": {
+    "multigas_no2_raw": {
+      "source": "GM102B",
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    "multigas_voc_raw": {
+      "source": "GM502B",
+      "scale": 1.0,
+      "offset": 0.0
+    },
+    "temperature_source": "published_temperatura",
+    "humidity_source": "published_umidita",
+    "elapsed_days_origin_epoch": 1785916800
+  },
+  "history": {
+    "sample_period_seconds": 3600,
+    "lag_1_seconds": 3600,
+    "lag_2_seconds": 7200,
+    "rolling_window_seconds": 7200,
+    "lag_tolerance_seconds": 900,
+    "minimum_rolling_samples": 3,
+    "require_full_rolling_window": true
+  },
+  "temperature_threshold_c": 30.0,
+  "coefficients": {
+    "intercept": 89.84894046,
+    "no2_raw": 3.08967148,
+    "voc_raw": 0.04722309364,
+    "temperature": 0.2073998517,
+    "humidity": -0.00771123405,
+    "no2_raw_lag_1": 0.732155505,
+    "no2_raw_lag_2": 0.4504224958,
+    "no2_raw_rolling": 1.521400947,
+    "voc_raw_lag_1": -0.230145137,
+    "voc_raw_lag_2": 0.03411805408,
+    "voc_raw_rolling": -0.05224941417,
+    "elapsed_days": -0.09159412337,
+    "no2_raw_squared": -0.6606045594,
+    "no2_raw_temperature": 0.06157221149,
+    "no2_raw_humidity": -0.02769616655,
+    "voc_raw_squared": -0.0003588672809,
+    "voc_raw_temperature": 0.00106320889,
+    "voc_raw_humidity": -0.0003769268059,
+    "temperature_above_threshold": -2.511363471
+  }
+}

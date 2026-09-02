@@ -8,6 +8,8 @@
 namespace HTTP_CONTRACT
 {
 constexpr const char *DIAGNOSTICS_ROUTE = "/set_sensors";
+constexpr const char *RUNTIME_MODEL_ROUTE = "/get_runtime_model";
+constexpr const char *RUNTIME_MODELS_ROUTE = "/get_runtime_models";
 constexpr const char *DIAGNOSTICS_QUERY_FIELDS[] = {"sensors", "ID", "versione", "board", "info"};
 constexpr size_t DIAGNOSTICS_QUERY_FIELD_COUNT =
     sizeof(DIAGNOSTICS_QUERY_FIELDS) / sizeof(DIAGNOSTICS_QUERY_FIELDS[0]);

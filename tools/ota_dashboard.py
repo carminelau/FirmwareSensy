@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""Local Sense Square OTA dashboard. Open http://127.0.0.1:8765 after launch."""
+"""Sense Square OTA dashboard. Defaults to localhost; use --lan for trusted LAN access."""
 
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import webbrowser
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -25,6 +30,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import ota_release as ota  # noqa: E402
 
 PLANS: dict[str, dict] = {}
+ACTIVITY_LOGS: list[dict] = []
 DASHBOARD_API_KEY: str | None = None
 ENVIRONMENT_BOARDS = {
     "sensy_2024_V4_black": "2024V4_BK", "sensy_2024_V4_green": "2024V4_GR",
@@ -32,6 +38,100 @@ ENVIRONMENT_BOARDS = {
     "sensy_2024_V1_green": "2024V1_GR", "sensy_2023_V2_black": "2023V2_BK",
     "sensy_2023_V1_green": "2023V1_GR", "sensy_2021_V4_white": "2021V4_WH",
 }
+
+
+def log_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: "***" if key.lower() in {"apikey", "api_key"} else log_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [log_safe(item) for item in value]
+    if isinstance(value, str) and len(value) > 12000:
+        return value[:12000] + "… [troncato]"
+    return value
+
+
+class LoggedSquareApi(ota.SquareApi):
+    def post(self, route: str, fields: dict | None = None, file_field=None, base_url: str | None = None, include_api_key: bool = True) -> Any:
+        started = time.perf_counter()
+        target = (base_url or self.base_url).rstrip("/")
+        params = dict(fields or {})
+        if file_field:
+            params[file_field[0]] = {"file": file_field[1].name, "bytes": file_field[1].stat().st_size}
+        try:
+            response = super().post(route, fields, file_field, base_url, include_api_key)
+            status = response.get("response_code", 200) if isinstance(response, dict) else 200
+            entry = {"time": datetime.now(timezone.utc).isoformat(), "type": "SENSE SQUARE", "method": "POST", "route": f"{target}/{route.lstrip('/')}", "status": status, "ok": ota.response_ok(response), "duration_ms": round((time.perf_counter() - started) * 1000), "params": log_safe(params), "response": log_safe(response), "message": ""}
+            ACTIVITY_LOGS.insert(0, entry)
+            del ACTIVITY_LOGS[300:]
+            return response
+        except Exception as exc:
+            ACTIVITY_LOGS.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "type": "SENSE SQUARE", "method": "POST", "route": f"{target}/{route.lstrip('/')}", "status": "ERR", "ok": False, "duration_ms": round((time.perf_counter() - started) * 1000), "params": log_safe(params), "response": {}, "message": str(exc)})
+            del ACTIVITY_LOGS[300:]
+            raise
+
+
+def firmware_api() -> ota.SquareApi:
+    return LoggedSquareApi(api_key(), ota.FIRMWARE_API_BASE)
+
+
+def normalized_firmware_name(value: Any) -> str:
+    """Backend catalogues may omit the .bin suffix stored in local release names."""
+    name = str(value).strip()
+    candidate = name if name.endswith(".bin") else f"{name}.bin"
+    return candidate if ota.FIRMWARE_RE.fullmatch(candidate) else ""
+
+
+def firmware_catalog(board: str | None = None) -> list[dict]:
+    """Load all firmware, or one board; support legacy suitable_board names."""
+    response = firmware_api().post("lista_firmware", {"board": board} if board else None)
+    result = response.get("result", []) if isinstance(response, dict) else []
+    if board and (not ota.response_ok(response) or not isinstance(result, list)):
+        # Old records used environment names. Keep board filter usable while data is migrated.
+        response = firmware_api().post("lista_firmware")
+        result = response.get("result", []) if isinstance(response, dict) else []
+    if not ota.response_ok(response) or not isinstance(result, list):
+        raise ValueError("catalogo firmware backend non disponibile")
+    catalog: dict[str, dict] = {}
+    for item in result:
+        firmware = {"versione": item} if isinstance(item, str) else item if isinstance(item, dict) else {}
+        version = normalized_firmware_name(firmware.get("versione", ""))
+        match = ota.FIRMWARE_RE.fullmatch(version)
+        if not match:
+            continue
+        suitable = firmware.get("suitable_board", [])
+        suitable = suitable if isinstance(suitable, list) else [suitable]
+        compatible = {ota.get_id_board(value) for value in suitable}
+        compatible.discard(None)
+        if board and board not in compatible and match.group("board") != board:
+            continue
+        catalog[version] = {
+            "versione": version,
+            "suitable_board": suitable,
+            "default_board": firmware.get("default_board", []),
+            "note": firmware.get("note", ""),
+        }
+    return [catalog[name] for name in sorted(catalog, reverse=True)]
+
+
+def platformio_boards(root: Path) -> list[dict]:
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.read(root / "platformio.ini", encoding="utf-8")
+    boards = []
+    for section in parser.sections():
+        if not section.startswith("env:"):
+            continue
+        environment = section.removeprefix("env:")
+        board = ENVIRONMENT_BOARDS.get(environment)
+        if not board:
+            continue
+        flags: dict[str, str] = {}
+        for line in parser.get(section, "build_flags", fallback="").splitlines():
+            line = line.strip()
+            if line.startswith("-D") and "=" in line:
+                key, value = line[2:].split("=", 1)
+                flags[key] = value.strip('\\"')
+        boards.append({"versione": board, "anno": flags.get("YEAR", board[:4]), "details": {"environment": environment, "platformio_board": parser.get(section, "board", fallback=""), "pins": flags, "relay": flags.get("RELAY")}})
+    return boards
 
 
 def load_config() -> dict:
@@ -92,13 +192,8 @@ def releases() -> list[str]:
 
 def next_release_version(board: str | None) -> str:
     versions: list[tuple[int, ...]] = []
-    response = ota.SquareApi(api_key()).post("lista_firmware")
-    names = response.get("result", []) if isinstance(response, dict) else []
-    if not ota.response_ok(response) or not isinstance(names, list):
-        raise ValueError("catalogo firmware backend non disponibile")
-    for name in names:
-        if not isinstance(name, str):
-            continue
+    for firmware in firmware_catalog(board):
+        name = firmware["versione"]
         match = ota.FIRMWARE_RE.fullmatch(name)
         if match and (board is None or match.group("board") == board):
             versions.append(tuple(int(part) for part in match.group("version")[1:].split("_")))
@@ -147,6 +242,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+        if urlparse(self.path).path.startswith("/api/") and urlparse(self.path).path != "/api/logs":
+            ACTIVITY_LOGS.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "method": self.command, "route": urlparse(self.path).path, "status": int(status), "ok": int(status) < 400, "duration_ms": round((time.perf_counter() - getattr(self, "_started_at", time.perf_counter())) * 1000), "message": payload.get("error") or payload.get("message", ""), "params": log_safe(getattr(self, "_request_params", {})), "response": log_safe(payload)})
+            del ACTIVITY_LOGS[300:]
 
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -158,7 +256,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         return value
 
     def do_GET(self):
+        self._started_at = time.perf_counter()
+        self._request_params = {"query": urlparse(self.path).query}
         path = urlparse(self.path).path
+        if path == "/api/logs":
+            errors = sum(not item["ok"] for item in ACTIVITY_LOGS)
+            self.send_json(HTTPStatus.OK, {"logs": ACTIVITY_LOGS, "total": len(ACTIVITY_LOGS), "errors": errors})
+            return
         if path == "/api/status":
             root = project_root()
             directory = firmware_dir()
@@ -174,12 +278,9 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/remote-firmwares":
             try:
-                response = ota.SquareApi(api_key()).post("lista_firmware")
-                result = response.get("result", []) if isinstance(response, dict) else []
-                if not ota.response_ok(response) or not isinstance(result, list):
-                    raise ValueError("catalogo firmware remoto non disponibile")
-                names = sorted({item for item in result if isinstance(item, str) and ota.FIRMWARE_RE.fullmatch(item)}, reverse=True)
-                self.send_json(HTTPStatus.OK, {"releases": names})
+                board = parse_qs(urlparse(self.path).query).get("board", [None])[0] or None
+                firmwares = firmware_catalog(board)
+                self.send_json(HTTPStatus.OK, {"releases": [item["versione"] for item in firmwares], "firmwares": firmwares, "boards": sorted(set(ENVIRONMENT_BOARDS.values()))})
             except (ValueError, RuntimeError) as exc:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             except Exception as exc:
@@ -192,13 +293,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except ValueError as exc:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
             return
+        if path == "/api/release-notes":
+            result = subprocess.run(["git", "-C", str(project_root()), "log", "-n", "12", "--pretty=format:%s"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            self.send_json(HTTPStatus.OK, {"notes": result.stdout.strip()})
+            return
+        if path == "/api/firmware-notes":
+            response = firmware_api().post("lista_firmware")
+            result = response.get("result", []) if isinstance(response, dict) else []
+            if not ota.response_ok(response) or not isinstance(result, list):
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": "catalogo firmware backend non disponibile"})
+                return
+            notes = subprocess.run(["git", "-C", str(project_root()), "log", "-n", "12", "--pretty=format:%s"], text=True, stdout=subprocess.PIPE).stdout.strip()
+            self.send_json(HTTPStatus.OK, {"firmwares": result, "suggested_notes": notes})
+            return
         if self.path == "/":
             self.path = "/index.html"
         return super().do_GET()
 
     def do_POST(self):
+        self._started_at = time.perf_counter()
         try:
             payload = self.read_json()
+            self._request_params = payload
             path = urlparse(self.path).path
             if path == "/api/build":
                 return self.build(payload)
@@ -206,6 +322,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 return self.config(payload)
             if path == "/api/upload":
                 return self.upload(payload)
+            if path == "/api/sync-boards":
+                return self.sync_boards()
+            if path == "/api/firmware-notes":
+                return self.update_firmware_notes(payload)
             if path == "/api/plan":
                 return self.plan(payload)
             if path == "/api/apply":
@@ -215,6 +335,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except Exception as exc:
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"errore server: {exc}"})
+
+    def do_DELETE(self):
+        self._started_at = time.perf_counter()
+        self._request_params = {}
+        if urlparse(self.path).path == "/api/logs":
+            ACTIVITY_LOGS.clear()
+            self.send_json(HTTPStatus.OK, {"logs": [], "total": 0, "errors": 0})
+            return
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "endpoint non trovato"})
 
     def build(self, payload: dict) -> None:
         root = project_root()
@@ -292,26 +421,41 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         names = payload.get("firmwares")
         if not isinstance(names, list) or not names:
             raise ValueError("selezionare almeno un firmware")
-        api = ota.SquareApi(None)
+        api = firmware_api()
         results = []
         for name in names:
             firmware = release_path(str(name))
+            route = "modifica_firmware" if payload.get("update_existing") else "inserimento_firmware"
             response = api.post(
-                "set_board_firmware",
-                ota.board_firmware_payload(firmware.name),
+                route,
+                {**ota.board_firmware_payload(firmware.name), "note": str(payload.get("notes", ""))},
                 ("contenuto", firmware),
-                base_url=ota.FIRMWARE_API_BASE,
-                include_api_key=False,
             )
             results.append({"firmware": firmware.name, "ok": ota.response_ok(response), "response": response})
         self.send_json(HTTPStatus.OK, {"results": results})
+
+    def sync_boards(self) -> None:
+        api = firmware_api()
+        result = []
+        for board in platformio_boards(project_root()):
+            response = api.post("inserimento_board", board)
+            result.append({"board": board["versione"], "ok": ota.response_ok(response), "response": response})
+        self.send_json(HTTPStatus.OK, {"results": result})
+
+    def update_firmware_notes(self, payload: dict) -> None:
+        version = ota.firmware_name(str(payload.get("versione", "")))
+        note = str(payload.get("note", "")).strip()
+        if not note:
+            raise ValueError("nota firmware richiesta")
+        response = firmware_api().post("modifica_firmware", {"versione": version, "note": note})
+        self.send_json(HTTPStatus.OK, {"versione": version, "ok": ota.response_ok(response), "response": response})
 
     def plan(self, payload: dict) -> None:
         firmware = ota.firmware_name(str(payload.get("firmware", "")))
         centraline = payload.get("centraline") or []
         if not isinstance(centraline, list) or not all(isinstance(item, str) and item.strip() for item in centraline):
             raise ValueError("lista centraline non valida")
-        plan = ota.make_plan(ota.SquareApi(api_key()), firmware, centraline or None, bool(payload.get("force")))
+        plan = ota.make_plan(LoggedSquareApi(api_key()), firmware, centraline or None, bool(payload.get("force")))
         plan_id = uuid.uuid4().hex
         PLANS[plan_id] = plan
         self.send_json(HTTPStatus.OK, {"plan_id": plan_id, "plan": plan})
@@ -322,7 +466,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             raise ValueError("piano assente o dashboard riavviata: genera nuovo piano")
         target = plan["target_firmware"]
         targets = [item for item in plan["devices"] if item["status"] == "needs_update"]
-        api = ota.SquareApi(api_key())
+        api = LoggedSquareApi(api_key())
         results = []
         for item in targets:
             response = api.post("modifica_firmware", {"centralina": item["ID"], "versione": target})
@@ -333,11 +477,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--open", action="store_true", help="apre dashboard nel browser predefinito")
+    parser.add_argument("--lan", action="store_true", help="espone dashboard sulla rete locale fidata")
+    parser.add_argument("--host", default=None, help="indirizzo ascolto, es. 192.168.1.25")
+    parser.add_argument("--port", type=int, default=8765, help="porta dashboard")
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), DashboardHandler)
-    print("Sense Square OTA dashboard: http://127.0.0.1:8765")
+    host = args.host or ("0.0.0.0" if args.lan else "127.0.0.1")
+    server = ThreadingHTTPServer((host, args.port), DashboardHandler)
+    local_url = f"http://127.0.0.1:{args.port}"
+    print(f"Sense Square OTA dashboard: {local_url}")
+    if host == "0.0.0.0":
+        addresses = sorted({item[4][0] for item in socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET) if not item[4][0].startswith("127.")})
+        for address in addresses:
+            print(f"LAN (rete fidata): http://{address}:{args.port}")
     if args.open:
-        webbrowser.open("http://127.0.0.1:8765")
+        webbrowser.open(local_url)
     server.serve_forever()
 
 
