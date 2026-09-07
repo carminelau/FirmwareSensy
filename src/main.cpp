@@ -70,6 +70,75 @@ TaskHandle_t Task0_handle = NULL;
 TaskHandle_t Task1_handle = NULL;
 TaskHandle_t Task2_handle = NULL;
 
+struct RelayTimerState
+{
+    bool active = false;
+    uint32_t expiresAtMs = 0;
+};
+
+static portMUX_TYPE relayTimerMux = portMUX_INITIALIZER_UNLOCKED;
+static RelayTimerState relay1Timer;
+static RelayTimerState relay2Timer;
+
+static void start_relay_timer(RelayTimerState &timer, uint16_t durationSeconds)
+{
+    portENTER_CRITICAL(&relayTimerMux);
+    timer.active = true;
+    timer.expiresAtMs = millis() + static_cast<uint32_t>(durationSeconds) * 1000UL;
+    portEXIT_CRITICAL(&relayTimerMux);
+}
+
+static void cancel_relay_timer(RelayTimerState &timer)
+{
+    portENTER_CRITICAL(&relayTimerMux);
+    timer.active = false;
+    timer.expiresAtMs = 0;
+    portEXIT_CRITICAL(&relayTimerMux);
+}
+
+static bool has_active_relay_timer()
+{
+    portENTER_CRITICAL(&relayTimerMux);
+    const bool active = relay1Timer.active || relay2Timer.active;
+    portEXIT_CRITICAL(&relayTimerMux);
+    return active;
+}
+
+static void process_relay_timers()
+{
+    const uint32_t now = millis();
+    bool relay1Expired = false;
+    bool relay2Expired = false;
+
+    portENTER_CRITICAL(&relayTimerMux);
+    if (relay1Timer.active && static_cast<int32_t>(now - relay1Timer.expiresAtMs) >= 0)
+    {
+        relay1Timer.active = false;
+        relay1Timer.expiresAtMs = 0;
+        relay1 = false;
+        relay1Expired = true;
+    }
+    if (relay2Timer.active && static_cast<int32_t>(now - relay2Timer.expiresAtMs) >= 0)
+    {
+        relay2Timer.active = false;
+        relay2Timer.expiresAtMs = 0;
+        relay2 = false;
+        relay2Expired = true;
+    }
+    portEXIT_CRITICAL(&relayTimerMux);
+
+    if (relay1Expired)
+    {
+        digitalWrite(RELAY1_PIN, LOW);
+        Serial.println("[RELAY] Timer relay 1 scaduto - relay spento");
+    }
+    if (relay2Expired)
+    {
+        digitalWrite(RELAY2_PIN, LOW);
+        Serial.println("[RELAY] Timer relay 2 scaduto - relay spento");
+    }
+}
+
 // Semaforo sincronizzazione sweep -> manager
 static SemaphoreHandle_t sweepDoneSem = NULL;
 
@@ -1117,12 +1186,11 @@ void check_serial_reset()
 }
 
 /**
- * Loop principale (non usato in questo progetto - usa FreeRTOS tasks)
+ * Loop principale per timer relay e comandi seriali; il monitoraggio usa task FreeRTOS.
  */
 void loop()
 {
-    // Il main loop non è usato, il codice è gestito tramite FreeRTOS tasks
-    // Ma monitora comandi dalla seriale per il reset (per schede senza BUTTON_RESET_PIN)
+    process_relay_timers();
     check_serial_reset();
     vTaskDelay(pdMS_TO_TICKS(100));
 }
@@ -2299,7 +2367,11 @@ void loop_monitoring(void *pvParameters)
             delete_message_received_mqtt();
 
             Serial.flush();
-            if (low)
+            if (low && has_active_relay_timer())
+            {
+                Serial.println("[RELAY] Deep sleep rinviato: timer relay attivo");
+            }
+            else if (low)
             {
                 // DISCONNESSIONE WiFi CON TIMEOUT: Previeni blocchi
                 Serial.println("DEBUG: WiFi disconnect con timeout...");
@@ -2378,7 +2450,7 @@ void loop_monitoring(void *pvParameters)
         // Cicli pari = OFFLINE, dispari = ONLINE
 
         // Riavvio periodico per pulizia (solo se abilitato)
-        if (MONITOR_REBOOT_CYCLES > 0)
+        if (MONITOR_REBOOT_CYCLES > 0 && !has_active_relay_timer())
         {
             if (monitorCycleCount >= MONITOR_REBOOT_CYCLES)
             {
@@ -4500,47 +4572,82 @@ void read_message_received_mqtt(String &receivedTopic, String &payload)
         arrived = true;
     }
 
-    const MqttCommand command = parse_mqtt_command(payload.c_str());
+    const ParsedMqttCommand parsedCommand = parse_mqtt_command_with_duration(payload.c_str());
+    const MqttCommand command = parsedCommand.command;
     bool relay1Changed = false;
     bool relay2Changed = false;
+    bool relay1Temporary = false;
+    bool relay2Temporary = false;
 
     switch (command)
     {
     case MqttCommand::RELAY1_ON:
+        cancel_relay_timer(relay1Timer);
         relay1 = true;
         relay1Changed = true;
         break;
     case MqttCommand::RELAY1_OFF:
+        cancel_relay_timer(relay1Timer);
         relay1 = false;
         relay1Changed = true;
         break;
     case MqttCommand::RELAY2_ON:
+        cancel_relay_timer(relay2Timer);
         relay2 = true;
         relay2Changed = true;
         break;
     case MqttCommand::RELAY2_OFF:
+        cancel_relay_timer(relay2Timer);
         relay2 = false;
         relay2Changed = true;
         break;
     case MqttCommand::BOTH_ON:
+        cancel_relay_timer(relay1Timer);
+        cancel_relay_timer(relay2Timer);
         relay1 = true;
         relay2 = true;
         relay1Changed = relay2Changed = true;
         break;
     case MqttCommand::BOTH_OFF:
+        cancel_relay_timer(relay1Timer);
+        cancel_relay_timer(relay2Timer);
         relay1 = false;
         relay2 = false;
         relay1Changed = relay2Changed = true;
         break;
     case MqttCommand::RELAY1_ON_RELAY2_OFF:
+        cancel_relay_timer(relay1Timer);
+        cancel_relay_timer(relay2Timer);
         relay1 = true;
         relay2 = false;
         relay1Changed = relay2Changed = true;
         break;
     case MqttCommand::RELAY1_OFF_RELAY2_ON:
+        cancel_relay_timer(relay1Timer);
+        cancel_relay_timer(relay2Timer);
         relay1 = false;
         relay2 = true;
         relay1Changed = relay2Changed = true;
+        break;
+    case MqttCommand::RELAY1_ON_TIMED:
+        relay1 = true;
+        relay1Changed = true;
+        relay1Temporary = true;
+        start_relay_timer(relay1Timer, parsedCommand.durationSeconds);
+        break;
+    case MqttCommand::RELAY2_ON_TIMED:
+        relay2 = true;
+        relay2Changed = true;
+        relay2Temporary = true;
+        start_relay_timer(relay2Timer, parsedCommand.durationSeconds);
+        break;
+    case MqttCommand::BOTH_ON_TIMED:
+        relay1 = true;
+        relay2 = true;
+        relay1Changed = relay2Changed = true;
+        relay1Temporary = relay2Temporary = true;
+        start_relay_timer(relay1Timer, parsedCommand.durationSeconds);
+        start_relay_timer(relay2Timer, parsedCommand.durationSeconds);
         break;
     case MqttCommand::LOW_POWER_ON:
         write_low_eeprom(true);
@@ -4563,16 +4670,24 @@ void read_message_received_mqtt(String &receivedTopic, String &payload)
     if (relay1Changed)
     {
         digitalWrite(RELAY1_PIN, relay1 ? HIGH : LOW);
-        write_relay1_eeprom(relay1);
+        write_relay1_eeprom(relay1Temporary ? false : relay1);
     }
     if (relay2Changed)
     {
         digitalWrite(RELAY2_PIN, relay2 ? HIGH : LOW);
-        write_relay2_eeprom(relay2);
+        write_relay2_eeprom(relay2Temporary ? false : relay2);
     }
     if (relay1Changed || relay2Changed)
     {
-        Serial.printf("[RELAY] Relay1=%d Relay2=%d - Stato salvato in EEPROM\n", relay1, relay2);
+        if (relay1Temporary || relay2Temporary)
+        {
+            Serial.printf("[RELAY] Relay1=%d Relay2=%d - Timer %u secondi\n",
+                          relay1, relay2, parsedCommand.durationSeconds);
+        }
+        else
+        {
+            Serial.printf("[RELAY] Relay1=%d Relay2=%d - Stato salvato in EEPROM\n", relay1, relay2);
+        }
         send_sensors_diagnostics();
     }
 }

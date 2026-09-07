@@ -40,6 +40,30 @@ static void test_mqtt_command_contract()
     TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::NONE), static_cast<int>(parse_mqtt_command(nullptr)));
 }
 
+static void test_timed_mqtt_command_contract()
+{
+    ParsedMqttCommand parsed = parse_mqtt_command_with_duration("on:1");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::RELAY1_ON_TIMED), static_cast<int>(parsed.command));
+    TEST_ASSERT_EQUAL_UINT16(1, parsed.durationSeconds);
+
+    parsed = parse_mqtt_command_with_duration("on2:0042");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::RELAY2_ON_TIMED), static_cast<int>(parsed.command));
+    TEST_ASSERT_EQUAL_UINT16(42, parsed.durationSeconds);
+
+    parsed = parse_mqtt_command_with_duration("onon:9999");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::BOTH_ON_TIMED), static_cast<int>(parsed.command));
+    TEST_ASSERT_EQUAL_UINT16(9999, parsed.durationSeconds);
+
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::NONE),
+                          static_cast<int>(parse_mqtt_command("on:0")));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::NONE),
+                          static_cast<int>(parse_mqtt_command("on2:10000")));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::NONE),
+                          static_cast<int>(parse_mqtt_command("onon:12s")));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(MqttCommand::NONE),
+                          static_cast<int>(parse_mqtt_command("on:")));
+}
+
 static void test_pollutants_are_unique_and_ordered()
 {
     PollutantMask pollutants;
@@ -89,6 +113,7 @@ int main(int, char **)
     UNITY_BEGIN();
     RUN_TEST(test_eeprom_contract);
     RUN_TEST(test_mqtt_command_contract);
+    RUN_TEST(test_timed_mqtt_command_contract);
     RUN_TEST(test_pollutants_are_unique_and_ordered);
     RUN_TEST(test_sniffer_adjustment_contract);
     RUN_TEST(test_diagnostics_http_contract);

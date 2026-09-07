@@ -15,6 +15,7 @@ Run on one classic ESP32 target and one ESP32-S3 target before production rollou
 - Configure WiFi. Reboot twice. Confirm SSID, topic, firmware name, low-power flag and relay states persist;
   confirm passwords are always masked.
 - Exercise every MQTT command: `on`, `of`, `on2`, `of2`, `onon`, `ofof`, `onof`, `ofon`, `low1`, `low0`, `reset`.
+- Exercise timed relay commands: `on:1`, `on2:2`, `onon:3`, `onon:9999`; confirm each selected relay turns off after the requested duration. Confirm `on:0`, `on2:10000` and non-numeric durations are ignored.
 - Compare MQTT JSON keys, units, retain flag and QoS with a pre-refactor capture.
 - Disconnect network: confirm SPIFFS/SD save. Reconnect: confirm retained-data replay and file deletion only after publish.
 - Test HTTP OTA with same/new version and SD OTA with valid/invalid `.bin`; confirm one OTA check line

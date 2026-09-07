@@ -41,6 +41,10 @@ the documented `sensors`, `ID`, `versione`, `board` and `info` query fields.
 - Data publish stays retained QoS 2; stored-data replay stays retained QoS 1.
 - Commands remain exact and case-sensitive: `on`, `of`, `on2`, `of2`, `onon`, `ofof`,
   `onof`, `ofon`, `low1`, `low0`, `reset`.
+- Timed relay commands are `on:<seconds>`, `on2:<seconds>` and `onon:<seconds>` for
+  relay 1, relay 2 and both relays. Duration is an integer from 1 to 9999 seconds.
+  Timed activation is non-blocking, always ends with the selected relay off and is not
+  persisted as on across a reboot. A normal relay command cancels the corresponding timer.
 - Sensor JSON keeps existing keys and units, including `timestamp`, location/GPS fields,
   PM fields, temperature/humidity, gas fields, CO2, wind, soil, luminosity and
   `num_devices_sniffed`.
